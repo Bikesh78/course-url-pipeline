@@ -1,0 +1,1885 @@
+ ▐▛███▛█   Claude Code v2.1.250
+▝▜██████▀  Opus 5 · Claude Team
+  ▝▝ ▝▝    ~/Documents/course_url
+
+
+❯ /grill-with-docs to create pipeline to fill the course_url column of this csv 
+sheet                                                                           
+
+● I'll start by invoking the grilling skill as requested, then explore the CSV
+  to ground the interview in reality.
+
+● Skill(grilling)
+  ⎿  Successfully loaded skill
+
+  Listed 1 directory (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Using grilling to stress-test this pipeline design, plus domain-modeling to
+  pin down vocabulary. First, let me actually look at the data.
+
+● Skill(domain-modeling)
+  ⎿  Successfully loaded skill
+
+  Read 1 file, ran 7 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● I've got the lay of the land. Before I ask anything, here's what the data
+  actually says — this reshapes the problem:
+
+  Scale is deceptive. 10,637 rows, but only 559 institutions. The top 20
+  institutions alone cover ~4,900 rows (46%). Aberystwyth has 456 rows and a
+  clean catalog at courses.aber.ac.uk/undergraduate/<slug>/. This is not 10,637
+  search problems — it's ~559 "learn the site's URL shape" problems.
+
+  Someone already tried this by hand and it went badly. Notes has 222 not found
+  entries, concentrated in Curtin (77), Charles Sturt (40), Aberystwyth (25).
+  But Aberystwyth demonstrably has pages for things like "Equine Science BSc
+  (Hons)". So not found largely records a failed method, not absent URLs.
+  course_url_via_web_search has 7 values, one of which is the literal string <.
+
+  Rows that aren't courses. Aintree Primary School — "YEAR 2", Brunswick South 
+  PS, plus 9 rows manually noted this is not a Course. Several website values
+  are aggregators (shorelight.com/universities/...) and one is a raw UUID
+  (42cdc3a0-faed-...).
+
+  Free wins. 704 duplicate (institution_name, name) pairs — dedupe before
+  spending anything. 3 websites lack a scheme, 12 are http://.
+
+  Now the grilling. Root of the tree first, because every downstream decision
+  depends on it.
+
+  ---
+
+  Question 1 of ~10: What is the cost of a wrong URL versus an empty cell?
+
+  This is the root because it decides whether pattern-extrapolation is allowed.
+  If I learn that Aberystwyth uses
+  courses.aber.ac.uk/undergraduate/<slugified-name>/, I can generate 456 URLs
+  for near-zero cost — but some will 404 or land on the wrong degree variant
+  ("Data Science BSc" vs "Data Science (with integrated year in industry) BSc").
+  Those variant collisions are exactly where guessing silently produces a
+  plausible but wrong URL.
+
+  - (a) Wrong is much worse than blank. Every URL must be verified as
+    fetched-and-correct. Unverifiable → leave blank, record why.
+  - (b) Roughly equal. Take the best candidate, attach a confidence score, let a
+    human triage the low-confidence tail.
+  - (c) Blank is much worse. Fill everything with the best guess; coverage
+    matters more than precision.
+
+  My recommendation: (a), with (b)'s scoring as the reporting layer. Reason:
+  this CSV looks like it feeds something downstream (student-facing course
+  links?). A URL that 200s on the wrong degree is undetectable by eye at 10k
+  scale and poisons the dataset permanently, whereas a blank cell is honest and
+  re-runnable. The matched_score / matched_status columns already sitting empty
+  in your header suggest you were reaching for exactly this — verified vs.
+  guessed vs. absent.
+
+  What's the downstream consumer of course_url, and which way do you want the
+  precision/recall dial set?
+
+✻ Worked for 1m 32s · done 2:38 PM
+
+❯ I would say go with b for nw with confidence score. The course_url is used    
+  for mapping purpose, mapping with the id field right now                      
+
+● Recorded: (b) — fill best candidate + confidence score, human triages the 
+  tail. That makes matched_score and matched_status load-bearing rather than
+  decorative, so I'll need to pin their semantics precisely.
+
+  But "mapping with the id field" is the fuzzy term I need to sharpen, because
+  it changes what a wrong URL actually costs — and therefore where the triage
+  threshold sits.
+
+  ---
+
+  Question 2: In the mapping, is course_url a payload or a join key?
+
+  Two readings, with very different failure modes:
+
+  - (i) Payload — id is already the stable identifier; course_url is just an
+    attribute you attach to it and eventually show someone (a link in a UI, an
+    enrichment field, something an LLM reads for context). A wrong URL here is a
+    bad link: embarrassing, correctable, contained to one row.
+  - (ii) Join key — you're using the URL to match this row against another
+    dataset (a scrape, a partner feed, a competitor catalog) and thereby decide
+    "row id=579b72cd is the same course as record X over there." A wrong URL
+    here silently welds two unrelated courses together, and the error propagates
+    into everything built on the join. The damage is not contained to the row.
+
+  The distinction matters because under (ii), a plausible-but-wrong URL is worse
+  than the (b) dial implies — near-miss degree variants ("Data Science BSc" vs
+  "Data Science with integrated year in industry BSc") are precisely the URLs
+  most likely to both look right and join wrong. Under (i), (b) is comfortably
+  the right call.
+
+  Concretely, in your data: Aberystwyth has both /undergraduate/data-science/
+  and /undergraduate/data-science-iy/ as separate rows with separate ids. If my
+  pipeline hands both rows the same URL, does that merely produce one wrong
+  link, or does it corrupt a join?
+
+  My recommendation: tell me it's (i), and I'll keep (b) as-is. If it's (ii),
+  I'd keep (b) but add a hard rule — no two rows within an institution may 
+  receive the same URL unless flagged — which is cheap to enforce and kills the
+  highest-risk failure class.
+
+  Which is it, and what's the other side of the mapping?
+
+✻ Churned for 19s · done 2:42 PM
+
+❯ i feel like it's (i). But it seems like (ii) will add extra precautionary     
+  rail. So let's go with (ii)                                                   
+
+● Good instinct — semantics of (i), rail of (ii). That gives me: best-candidate 
+  + score, and no two rows in an institution may share a URL unless flagged.
+  Cheap to enforce, kills the worst failure class.
+
+  Before Question 3 (the strategy fork), let me test my core hypothesis against
+  the real sites rather than ask you to speculate.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● This is the single most important finding so far. Slug-guessing is actively 
+  dangerous:
+
+  Equine Science BSc (Hons) is an undergraduate course.
+  /undergraduate/equine-science/ → 404. But /postgraduate/equine-science/ → 200.
+  A pattern-guesser would have happily filled in a postgraduate page for an
+  undergraduate row — a live, plausible, wrong URL. Only 1 of my 6 guesses hit,
+  and the one that "worked" was wrong. That kills option (c) from Q1
+  retroactively and argues hard for taking URLs only from the site's own
+  listings.
+
+  Site access is also heterogeneous — let me quantify that before asking you
+  anything.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Two more hard facts:
+
+  - The coverage curve is extremely favorable. 30 institutions = 53.5% of rows.
+    104 = 74%. 206 = 87%.
+  - Sitemaps won't carry this alone. Curtin's sitemap index has just two
+    children (page-sitemap1.xml, extras-sitemap1.xml) — its courses live
+    elsewhere. Coventry's 1MB sitemap is real but its study-at-coventry/...
+    paths are mostly FAQ/support pages, not course records. CSU returns 403 to a
+    plain fetch. Aberystwyth's course subdomain has no robots.txt at all.
+
+  So there's no single mechanism that works everywhere. That defines Question 3.
+
+  ---
+
+  Question 3: Is the primary discovery mechanism per-course search, or 
+  per-institution catalog extraction?
+
+  - (a) Search-first. For each row, query a search API with site:<institution 
+    domain> "<course name>", take the top hit, verify it. ~9,900 unique queries
+    ≈ $10–15 on Serper/Brave. No per-site code, immune to site heterogeneity.
+  - (b) Catalog-first. Per institution, find the course-listing/search pages,
+    paginate them, and extract (course name → href) pairs straight from the
+    site's own HTML. Then match your rows against that extracted list. More
+    engineering, far fewer requests than crawling every course page (listing
+    pages are ~5–50 per institution, not 456).
+  - (c) Tiered hybrid. (b) for institutions above a row threshold, (a) for the
+    long tail and wherever catalog discovery fails.
+
+  My recommendation: (c), sequenced catalog-first — and the reason is your Q2 
+  rail, not cost.
+
+  Catalog extraction has a property search cannot match: it gives me the
+  institution's complete candidate set at once. That turns the job from 456
+  independent guesses into one constrained assignment problem — match 456 rows
+  against ~500 catalog entries where each URL may be claimed once. That single
+  change:
+
+  1. Enforces the no-duplicate-URL rail structurally, rather than as a post-hoc
+     check.
+  2. Produces matched_score honestly — it's the name-similarity of the winning
+     pair, with the runner-up's margin available as the ambiguity signal.
+  3. Makes the Equine Science failure impossible. I never construct a URL; I
+     only ever select one the site itself published next to a course name. The
+     undergrad/postgrad mixup came from generating a path — extraction can't do
+     that.
+
+  Search-first can't enforce uniqueness cleanly (two rows independently querying
+  will happily both return /data-science/), and its score would be "the search
+  engine ranked it first," which is not a confidence measure.
+
+  So: catalog-first for the ~104 institutions covering 74% of rows, search
+  fallback for the remaining ~26% where per-institution effort doesn't amortize.
+
+  Does that tiering match your appetite, or do you want to start search-only to
+  get 100% coverage fast and improve precision later?
+
+✻ Sautéed for 1m 30s · done 2:49 PM
+
+❯ let's go with tiered hybrid approach for now                                  
+
+● Tiered hybrid it is. Next dependency: what this pipeline is built out of. Let
+  me check what's already available rather than assume.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Greenfield — no code, ever, in history. Runtime: Python 3.10 with requests,
+  bs4, lxml present; no rapidfuzz, httpx, playwright, pandas, no async client.
+  And critically: no search API key and no LLM SDK anywhere in the environment.
+
+  That last one is a hard constraint on the tier-2 fallback we just agreed to,
+  and it forces Question 4.
+
+  ---
+
+  Question 4: Does this pipeline run as a re-runnable script, or as an 
+  agent-driven session?
+
+  I ask because "pipeline" is doing a lot of work in your original request and
+  the two readings build completely different things:
+
+  - (a) Standalone script. python fill_course_urls.py — deterministic,
+    resumable, rate-limited, cron-able. Needs a real search provider (paid key)
+    for tier 2, and needs some mechanism to solve "find Coventry's course
+    listing page" across 559 sites without me hand-writing 559 scrapers.
+  - (b) Agent-driven. I (or subagents) work through the CSV interactively using
+    WebSearch/WebFetch, writing results back as we go. No API keys needed — the
+    tools are already here. But 10k rows across a session is not something that
+    reliably completes, and it isn't reproducible next quarter when the catalog
+    shifts.
+  - (c) Script skeleton with bounded LLM assists. Deterministic Python owns
+    fetching, caching, matching, scoring, and CSV I/O. An LLM is called only
+    where judgment is irreplaceable and the call count is small.
+
+  My recommendation: (c). The reason is that the expensive-per-row work and the
+  judgment-heavy work are on different axes:
+
+  - Judgment-heavy, low volume: "Where does this institution list its courses?"
+    — 559 calls, once, cacheable forever. LLMs are good at this; regexes are
+    hopeless at it given what we just saw (Curtin's courses aren't in its
+    sitemap, Coventry's course paths are indistinguishable from its FAQ paths by
+    pattern alone).
+  - Volume-heavy, judgment-light: "Which of these 500 extracted catalog entries
+    matches 'Agriculture with Animal Science MAgr'?" — 10,637 decisions, but
+    it's string similarity plus award/level parsing. Deterministic code does
+    this better and reproducibly, and only deterministic code can enforce the
+    one-URL-per-row assignment constraint globally.
+
+  So the LLM budget is ~559 discovery calls plus an adjudication pass over only
+  the ambiguous tail (say the rows where top-1 and top-2 scores are within a few
+  points), not 10,637 calls. That's tens of dollars, not thousands, and the
+  90%+ of rows that match cleanly never touch an LLM.
+
+  Two sub-decisions ride on your answer, which I'll ask next depending on it:
+  whether you're willing to add a paid search key for tier 2, and whether we may
+  pip install (rapidfuzz, httpx) or must stay on the stdlib+requests+bs4 set.
+
+  Which shape do you want — and is spending ~$20–60 on API keys acceptable, or
+  must this run on zero external budget?
+
+✻ Sautéed for 44s · done 2:54 PM
+
+❯ I'm not sure right now. Cost is also a factor for me right now. Even if i use 
+  search provider, would not need the use of agents to see if the sites being   
+  scrapped matches the exact course provided by the institution. I know a human 
+  being can read and verify themselves but I want to reduce the cognitive load  
+  on human with this pipeline. I need more clarification before making          
+  decision                                                                      
+
+● Fair — that's the right thing to be uncertain about, and it's the question the
+  whole cost model hinges on. Let me answer it with an experiment instead of an
+  opinion, because I think the premise ("verification needs an agent") is
+  mostly false and I want to show you rather than tell you.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Now the decisive test. Raw difflib gives only 0.686 for a correct match —
+  because (Hons) and the UCAS code (7G73) are noise. The real question is
+  whether normalized matching separates the two Data Science variants, which is
+  the exact near-miss failure class you're worried about.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● This settles your concern. With the institution name stripped from <title> and
+  awards/UCAS codes normalized:
+
+  CSV row: Data Science BSc (Hons)
+  data-science/: 0.865
+  data-science-iy/: 0.457
+  english-literature-degree/: 0.149
+  ────────────────────────────────────────
+  CSV row: Data Science (…integrated year…) BSc (Hons)
+  data-science/: 0.514
+  data-science-iy/: 0.951
+  english-literature-degree/: 0.189
+  ────────────────────────────────────────
+  CSV row: English Literature BA (Hons)
+  data-science/: 0.131
+  data-science-iy/: 0.220
+  english-literature-degree/: 1.000
+
+  Every diagonal wins with a margin of +0.41 to +0.78. And the award guard
+  catches the Equine trap: Equine Science BSc (Hons) scores 0.61 against a
+  correct BSc page but 0.32 against the MSc page.
+
+  All of that used stdlib only — re, difflib, urllib. No search API, no LLM, no
+  pip install.
+
+  So to answer you directly: no, you don't need an agent to verify the match.
+  The course name is printed on the page you fetched. Comparing it to the name
+  you already have is string work, and string work is free and reproducible. An
+  agent re-reading 10,637 pages would cost real money to reach a worse result
+  than this, because it wouldn't enforce the one-URL-per-row constraint
+  globally.
+
+  Where money is genuinely unavoidable — and it's much narrower than you feared:
+
+  Stage: Fetch + title extract + normalize + score + assign + write CSV
+  Volume: 10,637
+  Deterministic?: Yes
+  Cost: $0
+  ────────────────────────────────────────
+  Stage: Catalog discovery ("where does this site list courses?")
+  Volume: 559, cached forever
+  Deterministic?: Partly — sitemap//courses probing works on many
+  Cost: $0 for the ones that probe cleanly
+  ────────────────────────────────────────
+  Stage: Long-tail rows with no discoverable catalog
+  Volume: unknown until measured
+  Deterministic?: No
+  Cost: search key, ~$0.001/query
+  ────────────────────────────────────────
+  Stage: Thin-margin adjudication
+  Volume: only the ambiguous band
+  Deterministic?: No
+  Cost: small LLM spend, or human triage
+
+  On cognitive load: the goal isn't a human checking 10,637 rows — it's a human
+  checking only the thin-margin band, presented as "row X → candidate A (0.62), 
+  runner-up B (0.58)", sorted worst-first. Everything above the confident
+  threshold is auto-filled; everything below the floor is left blank with a
+  reason. Based on the margins above, I'd expect the review queue to be a
+  low-thousands-of-rows worst case, and plausibly a few hundred for the big
+  clean catalogs.
+
+  Which means you don't have to decide the money question now, and that's the
+  question I want to put to you.
+
+● User answered Claude's questions:
+  ⎿  · Given verification is free and deterministic, how do you want to sequence
+     the paid decision? → Build free tier first, measure, then decide 
+     (Recommended)
+
+● Locked: Phase 1 free, measure, then decide. Paid tiers designed in as
+  plug-ins.
+
+  Now the biggest technical risk in Phase 1 is catalog discovery — if generic
+  probing can't find listing pages without 559 hand-written scrapers, Phase 1
+  underdelivers. That's testable, so let me test it rather than ask you.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● 8 out of 8 institutions had a discoverable hub via generic path probing — and
+  the redirects are themselves signal (Adelaide /courses→/study/, ANU
+  /study→study.anu.edu.au, Bond /study/courses→/study/program-finder). No
+  hand-written scrapers needed to get a foothold.
+
+  But those are hub pages, not complete catalogs — and names like
+  "program-finder" / "course-search" smell like JavaScript apps that urllib
+  can't render. That's the real risk, so let me run one end-to-end feasibility
+  proof on Abertay (224 rows).
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Definitive, and it cuts both ways — which is exactly what I needed to know:
+
+  Aberystwyth: extraction works, and proves guessing was doomed.
+  courses.aber.ac.uk/undergraduate/ is server-rendered and yields 289 unique 
+  course URLs, /postgraduate/ another 109 (~398 vs 456 CSV rows). Look at the
+  actual slugs: 142L-international-relations, BA-education-spanish,
+  D406D-nuffield. No pattern-generator on earth produces those. Extraction isn't
+  just safer than guessing — it's the only thing that can work here.
+
+  Abertay: extraction fails. 148KB page, only 13 nav links. It's a JS
+  course-finder; the courses never appear in the HTML.
+
+  That gives the pipeline a self-diagnosing signal: compare extracted candidate
+  count against that institution's CSV row count. 289 extracted vs 456 rows =
+  healthy. 13 extracted vs 224 rows = extraction failed, escalate tier. No human
+  needed to classify sites.
+
+  Let me check whether the free sitemap fallback rescues the JS sites, since
+  that decides if the ladder stays at $0.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Sitemaps do not rescue the JS sites: Abertay has no sitemap at all (404, and
+  its robots.txt declares none), Bond's has 13 entries with zero course URLs,
+  ANU's has 9. So the free ladder is:
+
+  1. Server-rendered listing subtree (Aberystwyth ✓, Curtin/Adelaide/Coventry
+     likely) — extract (name, href) pairs directly.
+  2. Sitemap filter — works where sitemaps are real (Coventry's 1MB one).
+  3. Detect the site's own JSON/XHR endpoint — JS finders like Abertay's are
+     usually backed by a plain GET API; discoverable once per institution,
+     cached forever, still $0.
+  4. Escalate → Phase 2 paid search, or blank with a recorded reason.
+
+  I have enough technical grounding. The remaining questions are preferences I
+  can't discover from the data — starting with the one that risks destroying
+  work.
+
+● User answered Claude's questions:
+  ⎿  · How should the pipeline write results, and how should it treat the prior 
+     human annotations already in the sheet? → New output file; prior notes 
+     preserved as evidence, not authority (Recommended)
+
+● Let me quantify the junk-row problem before asking about it.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Found a data-integrity bug. Those 4 rows have institution_name values of  IT,
+  Asian Studies,  Visual Arts and Music) — that's the signature of split
+  fields. Let me confirm.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Confirmed — 4 structurally corrupt rows, and a second discovery. The source
+  writer didn't quote names containing commas: Graduate Non-Award (Economics and
+  Commerce, Visual Arts and Music) split across fields, shifting every column
+  left by one. So institution_name absorbed the name's tail, Notes absorbed the
+  institution name, and website absorbed a UUID.
+
+  And the "empty" trailing columns aren't empty — they hold batch_7, at a
+  shifted position in the corrupt rows. Let me check that column properly.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● batch_7 appears only in those 4 corrupt rows — it's corruption spillover, not
+  a real column. The two unnamed columns are genuinely empty across all 10,633
+  clean rows (stray trailing commas in the header). All 4 corrupt rows are ANU
+  "Non-Award" administrative categories, so they're both easily repaired and
+  low-value.
+
+  I now have everything technical. Two last preference questions — these are the
+  only remaining branches, and I'll define the matched_status vocabulary myself
+  in the plan for you to review.
+
+● User answered Claude's questions:
+  ⎿  · How should the pipeline handle rows that aren't really courses? (183 rows
+     at school-like institutions, 132 bare test-prep names like 'IELTS'/'PTE', 
+     10 named 'YEAR 2'/'Prep – Year 6', 4 structurally corrupt) → Attempt all, 
+     but pre-flag with a reason code (Recommended)
+     · What crawl politeness and runtime budget should a full free-tier run 
+     target? → Polite: 1 req/sec per domain, ~8 domains in parallel 
+     (Recommended)
+
+● All decisions locked. Writing the plan.
+
+● Updated plan
+  ⎿  PreToolUse:Write hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/secret-scan.sh: not found
+  ⎿  /plan to preview
+
+● The plan is written. Summary of where the grilling landed:
+
+  The premise that changed everything: this isn't 10,637 search problems, it's
+  ~559 catalog-extraction problems. 30 institutions cover 53.5% of rows.
+
+  The premise I disproved: you worried verification would need agents. It
+  doesn't — the course name is printed on the page you fetch, so comparing it is
+  stdlib string work. Normalized difflib scored the correct Data Science
+  variant 0.865/0.951 against its decoy at 0.457/0.514, and the award guard
+  scored the correct Equine BSc page 0.61 against the wrong MSc page at 0.32.
+  That's free, reproducible, and enforces your uniqueness rail globally in a way
+  an agent re-reading 10k pages could not.
+
+  The trap that killed the obvious approach: /undergraduate/equine-science/ →
+  404, /postgraduate/equine-science/ → 200. Slug-guessing doesn't fail loudly,
+  it files a postgraduate page against an undergraduate row. Combined with
+  Aberystwyth's real slugs (142L-international-relations, D406D-nuffield), URL
+  generation is disqualified outright — the pipeline only ever selects URLs the
+  site itself published.
+
+  Two things I found that you didn't ask about but would have bitten you: 4 rows
+  are structurally corrupt from unquoted commas in course names (columns
+  shifted left, a UUID sitting in website, batch_7 spilled into the trailing
+  columns), and the 222 not found notes are demonstrably wrong — Aberystwyth
+  publishes pages for rows marked not found. The plan repairs the former and
+  treats the latter as evidence rather than authority, with a
+  prior_note_disagrees flag that measures exactly how much the manual pass
+  missed.
+
+  One thing I want to flag as a genuine open risk: threshold calibration. There
+  are only 4 usable ground-truth URLs in the sheet, so I cannot honestly fit
+  confident/floor cutoffs from the data alone. The plan starts at ≥0.80 with
+  margin ≥0.10 and emits a stratified ~150-row sample for one-time labelling.
+  That's the only unavoidable human cost, and if you'd rather skip it, the
+  consequence is that matched_score becomes an ordering signal rather than a
+  calibrated confidence — still useful for triage, but you shouldn't auto-trust
+  a threshold nobody validated.
+
+  Phase 1 spends $0 and installs nothing. The paid tiers stay unbuilt until
+  coverage_report.md tells you whether they're worth it.
+  ⎿  User rejected Claude's plan:
+     ╭─────────────────────────────────────────────────────────────────────────╮
+     │ Pipeline to fill course_url in processed_courses.csv                    │
+     │                                                                         │
+     │ Context                                                                 │
+     │                                                                         │
+     │ processed_courses.csv holds 10,637 course rows across 559 institutions. │
+     │ The                                                                     │
+     │ course_url column is 100% empty; matched_score and matched_status are   │
+     │ empty too. website (institution homepage) is populated for 10,635 rows. │
+     │                                                                         │
+     │ course_url is consumed as a payload attached to the id field for        │
+     │ mapping                                                                 │
+     │ purposes. A wrong URL is therefore a bad link rather than a corrupted   │
+     │ join — but                                                              │
+     │ we adopt join-grade safety rails anyway (see Decision 2), because       │
+     │ near-miss                                                               │
+     │ degree variants are the dominant failure mode and they are cheap to     │
+     │ defend                                                                  │
+     │ against.                                                                │
+     │                                                                         │
+     │ A prior manual attempt exists and failed: Notes contains 222 not found  │
+     │ entries (Curtin 77, Charles Sturt 40, Aberystwyth 25), and              │
+     │ course_url_via_web_search has 7 values — one of which is the literal    │
+     │ string                                                                  │
+     │ <. Those not found verdicts are unreliable. Aberystwyth is marked       │
+     │ not found for rows such as Equine Science BSc (Hons), yet Aberystwyth   │
+     │ publishes a full server-rendered catalog. The annotations record a      │
+     │ failed                                                                  │
+     │ method, not absent URLs.                                                │
+     │                                                                         │
+     │ The intended outcome: fill course_url automatically with a confidence   │
+     │ score,                                                                  │
+     │ so that human attention is spent only on a small ambiguous tail rather  │
+     │ than on                                                                 │
+     │ 10,637 rows.                                                            │
+     │                                                                         │
+     │ Findings that shaped this plan                                          │
+     │                                                                         │
+     │ All verified live during planning, not assumed.                         │
+     │                                                                         │
+     │ Scale is deceptive — this is ~559 problems, not 10,637.                 │
+     │                                                                         │
+     │ ┌──────────────────────────────┬───────┬────────────────┐               │
+     │ │ Institutions with ≥N courses │ Count │  Rows covered  │               │
+     │ ├──────────────────────────────┼───────┼────────────────┤               │
+     │ │ ≥50                          │ 30    │ 5,696 (53.5%)  │               │
+     │ ├──────────────────────────────┼───────┼────────────────┤               │
+     │ │ ≥20                          │ 104   │ 7,858 (73.9%)  │               │
+     │ ├──────────────────────────────┼───────┼────────────────┤               │
+     │ │ ≥10                          │ 206   │ 9,258 (87.0%)  │               │
+     │ ├──────────────────────────────┼───────┼────────────────┤               │
+     │ │ ≥5                           │ 332   │ 10,126 (95.2%) │               │
+     │ └──────────────────────────────┴───────┴────────────────┘               │
+     │                                                                         │
+     │ Also 704 duplicate (institution_name, name) pairs — dedupe before       │
+     │ spending a                                                              │
+     │ single request.                                                         │
+     │                                                                         │
+     │ URL guessing is not merely risky, it is disqualified. Aberystwyth's     │
+     │ real                                                                    │
+     │ slugs are 142L-international-relations, BA-education-spanish,           │
+     │ D406D-nuffield — unreachable by any generator. Worse, guessing produces │
+     │ live wrong pages: /undergraduate/equine-science/ returns 404 while      │
+     │ /postgraduate/equine-science/ returns 200, so a guesser would file a    │
+     │ postgraduate page against an undergraduate row. URLs must only ever be  │
+     │ selected from the institution's own listings, never constructed.        │
+     │                                                                         │
+     │ Deterministic verification works, using stdlib only. After stripping    │
+     │ the                                                                     │
+     │ institution name from <title> and normalising awards/UCAS codes,        │
+     │ difflib.SequenceMatcher separates the exact near-miss class we care     │
+     │ about:                                                                  │
+     │                                                                         │
+     │ CSV row: Data Science BSc (Hons)                                        │
+     │ data-science/: 0.865                                                    │
+     │ data-science-iy/: 0.457                                                 │
+     │ english-literature-degree/: 0.149                                       │
+     │ ────────────────────────────────────────                                │
+     │ CSV row: Data Science (…integrated year…) BSc (Hons)                    │
+     │ data-science/: 0.514                                                    │
+     │ data-science-iy/: 0.951                                                 │
+     │ english-literature-degree/: 0.189                                       │
+     │ ────────────────────────────────────────                                │
+     │ CSV row: English Literature BA (Hons)                                   │
+     │ data-science/: 0.131                                                    │
+     │ data-science-iy/: 0.220                                                 │
+     │ english-literature-degree/: 1.000                                       │
+     │                                                                         │
+     │ Every diagonal wins by +0.41 to +0.78. An award-agreement penalty       │
+     │ catches                                                                 │
+     │ the Equine trap: Equine Science BSc (Hons) scores 0.61 vs a BSc page    │
+     │ but only                                                                │
+     │ 0.32 vs the MSc page. No LLM or paid API is required to verify a match  │
+     │ — the                                                                   │
+     │ course name is printed on the page we fetched.                          │
+     │                                                                         │
+     │ Catalog extraction works on server-rendered sites and fails on JS       │
+     │ finders.                                                                │
+     │ courses.aber.ac.uk/undergraduate/ yields 289 course URLs,               │
+     │ /postgraduate/                                                          │
+     │ another 109 (~398 against 456 rows). Abertay's course-search is 148KB   │
+     │ of                                                                      │
+     │ JavaScript that yields only 13 nav links. Sitemaps do not rescue the JS │
+     │ sites:                                                                  │
+     │ Abertay has none (404, robots.txt declares none), Bond's has 13 entries │
+     │ with                                                                    │
+     │ zero course URLs, ANU's has 9; Coventry's 1MB sitemap is real but its   │
+     │ study-at-coventry/... paths are indistinguishable from FAQ pages by     │
+     │ pattern.                                                                │
+     │                                                                         │
+     │ This yields a self-diagnosing health signal: compare extracted          │
+     │ candidate                                                               │
+     │ count against that institution's row count. 289-vs-456 is healthy;      │
+     │ 13-vs-224 is                                                            │
+     │ a failed extraction that escalates automatically. No human classifies   │
+     │ sites.                                                                  │
+     │                                                                         │
+     │ Generic hub discovery succeeds broadly. Probing /courses, /study,       │
+     │ /undergraduate, /course-search, /programs found a 200 hub for 8 of 8    │
+     │ top institutions, and redirects carry signal (Adelaide                  │
+     │ /courses→/study/,                                                       │
+     │ ANU /study→study.anu.edu.au, Bond                                       │
+     │ /study/courses→/study/program-finder).                                  │
+     │                                                                         │
+     │ Data integrity defects. 4 rows are structurally corrupt: the source     │
+     │ wrote                                                                   │
+     │ unquoted commas inside names, so Graduate Non-Award (Economics and      │
+     │ Commerce, Visual Arts and Music) split across fields and shifted every  │
+     │ column left —                                                           │
+     │ institution_name became  Visual Arts and Music), website became a UUID  │
+     │ 42cdc3a0-…, and a batch_7 tag spilled into the trailing columns. The    │
+     │ two                                                                     │
+     │ unnamed trailing columns are otherwise empty for all 10,633 clean rows  │
+     │ (stray header commas), so batch_7 is corruption spillover, not data.    │
+     │ Also:                                                                   │
+     │ 3 website values lack a scheme, 12 are http://, 2 point at aggregators  │
+     │ (shorelight.com), and CSU returns 403 to a plain fetch.                 │
+     │                                                                         │
+     │ Decisions                                                               │
+     │                                                                         │
+     │ 1. Best-candidate + confidence score, human triages the tail — not      │
+     │    verify-or-blank, not fill-everything.                                │
+     │ 2. course_url is a payload, but we enforce the join-grade rail:         │
+     │    no two rows within an institution may receive the same URL unless    │
+     │    flagged. Enforced structurally by constrained assignment, not        │
+     │    post-hoc.                                                            │
+     │ 3. Tiered hybrid: per-institution catalog extraction for institutions   │
+     │    where                                                                │
+     │    it amortises, search fallback for the long tail.                     │
+     │ 4. Phase 1 is free and stdlib-only. Measure real coverage, then decide  │
+     │    whether to buy a search key or LLM adjudication. Paid tiers are      │
+     │    designed in                                                          │
+     │    as plug-ins so adding one later is config, not a rewrite.            │
+     │ 5. Never mutate processed_courses.csv. Prior Notes are preserved as     │
+     │    evidence and cross-checked, but are never authoritative and never    │
+     │    cause                                                                │
+     │    a row to be skipped.                                                 │
+     │ 6. Attempt every row, pre-flagging suspicious ones with reason codes.   │
+     │ 7. Polite crawling: 1 req/sec per domain, ~8 domains concurrent,        │
+     │    robots.txt honoured, all responses cached, fully resumable.          │
+     │                                                                         │
+     │ Domain vocabulary                                                       │
+     │                                                                         │
+     │ To be written to a new CONTEXT.md (glossary only, no implementation     │
+     │ detail):                                                                │
+     │                                                                         │
+     │ - Course row — one line of the input CSV, identified by id. The unit of │
+     │   work.                                                                 │
+     │ - Institution — a provider, keyed by institution_name; owns one site.   │
+     │ - Catalog — the set of (course name, URL) pairs extracted from an       │
+     │   institution's own listing pages. Never generated; only extracted.     │
+     │ - Candidate — one catalog entry considered as a match for a course row. │
+     │ - Assignment — the constrained selection of at most one candidate per   │
+     │   row,                                                                  │
+     │   where each URL may be claimed by at most one row within an            │
+     │   institution.                                                          │
+     │ - Margin — winning score minus runner-up score. The ambiguity signal;   │
+     │   distinct from confidence.                                             │
+     │ - Review queue — the ambiguous subset surfaced for human triage.        │
+     │                                                                         │
+     │ Output schema                                                           │
+     │                                                                         │
+     │ New file courses_filled.csv — all original columns, plus:               │
+     │                                                                         │
+     │ ┌────────────────┬───────────────────────────────────────────────────── │
+     │ ────┐                                                                   │
+     │ │     Column     │                         Meaning                      │
+     │    │                                                                    │
+     │ ├────────────────┼───────────────────────────────────────────────────── │
+     │ ────┤                                                                   │
+     │ │ course_url     │ assigned URL, or blank                               │
+     │    │                                                                    │
+     │ ├────────────────┼───────────────────────────────────────────────────── │
+     │ ────┤                                                                   │
+     │ │ matched_score  │ 0.000–1.000 normalised name similarity of the        │
+     │ winning   │                                                             │
+     │ │                │ pair                                                 │
+     │    │                                                                    │
+     │ ├────────────────┼───────────────────────────────────────────────────── │
+     │ ────┤                                                                   │
+     │ │ matched_status │ enum below                                           │
+     │    │                                                                    │
+     │ ├────────────────┼───────────────────────────────────────────────────── │
+     │ ────┤                                                                   │
+     │ │ match_margin   │ top-1 score minus top-2 score                        │
+     │    │                                                                    │
+     │ ├────────────────┼───────────────────────────────────────────────────── │
+     │ ────┤                                                                   │
+     │ │ match_evidence │ the catalog name / page title matched against, plus  │
+     │    │                                                                    │
+     │ │                │ runner-up URL                                        │
+     │    │                                                                    │
+     │ ├────────────────┼───────────────────────────────────────────────────── │
+     │ ────┤                                                                   │
+     │ │ row_flags      │ ;-separated reason codes                             │
+     │    │                                                                    │
+     │ └────────────────┴───────────────────────────────────────────────────── │
+     │ ────┘                                                                   │
+     │                                                                         │
+     │ matched_status vocabulary (orthogonal to row_flags):                    │
+     │                                                                         │
+     │ - verified — URL came from the institution's own listing and a live     │
+     │   fetch                                                                 │
+     │   confirmed the page title matches above the confident threshold.       │
+     │ - probable — matched above the floor but below confident, or margin too │
+     │   thin.                                                                 │
+     │   Goes to the review queue.                                             │
+     │ - ambiguous — two or more candidates within the margin band.            │
+     │ - no_match — catalog found, nothing scored above the floor.             │
+     │ - no_catalog — extraction failed for this institution (Phase 2          │
+     │   candidate).                                                           │
+     │ - url_dead — assigned URL failed its verification fetch.                │
+     │                                                                         │
+     │ row_flags codes: k12_institution (183 rows), bare_credential_name       │
+     │ (132),                                                                  │
+     │ year_level_not_course (10), malformed_row_repaired (4),                 │
+     │ aggregator_website (2), duplicate_url_collision, prior_note_disagrees.  │
+     │                                                                         │
+     │ Also written: review_queue.csv (ambiguous rows only, worst margin       │
+     │ first, with                                                             │
+     │ both candidates side by side) and coverage_report.md (the Phase 2       │
+     │ decision                                                                │
+     │ input: coverage %, ambiguous count, per-institution extraction health). │
+     │                                                                         │
+     │ Files to create                                                         │
+     │                                                                         │
+     │ Greenfield — the repo contains only the CSV and has never held code.    │
+     │                                                                         │
+     │ run.py                      CLI orchestrator: --stage, --institution,   │
+     │ --limit, --dry-run                                                      │
+     │ pipeline/fetch.py           polite cached fetcher: robots.txt, 1        │
+     │ req/s/domain, retry, .cache/                                            │
+     │ pipeline/load.py            CSV load, corrupt-row repair, dedupe, junk  │
+     │ flagging                                                                │
+     │ pipeline/registry.py        institution registry: normalise website,    │
+     │ resolve redirects                                                       │
+     │ pipeline/catalog.py         hub discovery + extraction ladder ->        │
+     │ catalogs/<slug>.json                                                    │
+     │ pipeline/normalize.py       name/title normalisation, award + level     │
+     │ parsing                                                                 │
+     │ pipeline/match.py           scoring, margin, constrained assignment     │
+     │ pipeline/report.py          CSV writers, review queue, coverage report  │
+     │ tests/                      unit + golden tests                         │
+     │                                                                         │
+     │ Stdlib-first: csv, re, difflib, urllib, json, hashlib,                  │
+     │ concurrent.futures, plus the already-installed bs4/lxml for HTML        │
+     │ parsing.                                                                │
+     │ No pip install needed. (rapidfuzz would be a drop-in speed upgrade for  │
+     │ difflib later; scipy.optimize.linear_sum_assignment would upgrade       │
+     │ greedy                                                                  │
+     │ assignment to optimal — both optional, neither required.)               │
+     │                                                                         │
+     │ Stages (each independently resumable)                                   │
+     │                                                                         │
+     │ Stage 0 — Load, repair, flag. Read the CSV. Repair the 4 corrupt rows   │
+     │ by                                                                      │
+     │ rejoining the split name field and recovering the institution from      │
+     │ Notes;                                                                  │
+     │ flag them malformed_row_repaired. Drop the two vestigial unnamed        │
+     │ columns.                                                                │
+     │ Dedupe the 704 repeated (institution_name, name) pairs into one work    │
+     │ item                                                                    │
+     │ fanned back out to all ids at write time. Apply junk flags.             │
+     │                                                                         │
+     │ Stage 1 — Institution registry. For each of 559 institutions: normalise │
+     │ website (add scheme to the 3 bare ones, upgrade the 12 http://), follow │
+     │ redirects once to find the canonical host, record the effective course  │
+     │ host                                                                    │
+     │ (e.g. aber.ac.uk → courses.aber.ac.uk). Flag the 2 aggregator sites.    │
+     │                                                                         │
+     │ Stage 2 — Catalog discovery and extraction. Per institution, walk the   │
+     │ ladder until the health check passes:                                   │
+     │                                                                         │
+     │ 1. Probe hub paths (/courses, /study, /undergraduate, /postgraduate,    │
+     │    /course-search, /programs, /study/courses) and follow redirects.     │
+     │ 2. Bounded BFS (depth ≤ 2, capped page count) within the course         │
+     │    subtree,                                                             │
+     │    extracting (anchor text, href) pairs that look like course pages.    │
+     │ 3. Sitemap filter where a sitemap exists and contains course-like       │
+     │    paths.                                                               │
+     │ 4. Detect the JS finder's backing JSON/XHR endpoint and read it         │
+     │    directly.                                                            │
+     │                                                                         │
+     │ Health check: extracted candidates ≥ ~40% of that institution's row     │
+     │ count.                                                                  │
+     │ Pass → cache catalogs/<slug>.json. Fail → no_catalog, deferred to Phase │
+     │ 2.                                                                      │
+     │ Crucially, record the level subtree each candidate came from            │
+     │ (undergraduate / postgraduate) — this is what prevents the Equine trap. │
+     │                                                                         │
+     │ Stage 3 — Score and assign. For each institution, build the             │
+     │ row × candidate score matrix using pipeline/normalize.py:               │
+     │                                                                         │
+     │ - strip institution name from titles/anchors, strip UCAS-style codes    │
+     │   (\b[a-z]?\d{3,4}[a-z]?\b), strip (Hons)/honours, fold punctuation     │
+     │ - parse the award (BSc, BA, MSc, MBA, MAgr, FdSc, …) and derive         │
+     │   level; apply the award-agreement penalty (×0.55 on disagreement) and  │
+     │   prefer                                                                │
+     │   candidates from the matching level subtree                            │
+     │ - score with difflib.SequenceMatcher                                    │
+     │                                                                         │
+     │ Then assign greedily by descending score with uniqueness enforced —     │
+     │ each                                                                    │
+     │ URL claimable once per institution. Record match_margin from the        │
+     │ runner-up.                                                              │
+     │ Greedy is chosen over optimal because it is explainable in the review   │
+     │ queue;                                                                  │
+     │ uniqueness is what matters, and it holds either way.                    │
+     │                                                                         │
+     │ Stage 4 — Verify winners. Fetch each assigned URL, extract              │
+     │ <title>/<h1>,                                                           │
+     │ re-score against the row name. Pass above the confident threshold →     │
+     │ verified. Fail → probable or url_dead. This is the step that earns the  │
+     │ verified label, and it is what makes the score trustworthy rather than  │
+     │ merely internally consistent.                                           │
+     │                                                                         │
+     │ Stage 5 — Write. Emit courses_filled.csv, review_queue.csv,             │
+     │ coverage_report.md. Cross-check each result against the prior Notes;    │
+     │ where                                                                   │
+     │ we found a URL for a row marked not found, flag prior_note_disagrees —  │
+     │ that                                                                    │
+     │ set is the direct measure of how much the manual pass missed.           │
+     │                                                                         │
+     │ Threshold calibration                                                   │
+     │                                                                         │
+     │ Thresholds must be fitted, not guessed. Starting points from the        │
+     │ measured                                                                │
+     │ margins: confident ≥ 0.80 and margin ≥ 0.10; floor 0.55.                │
+     │                                                                         │
+     │ There is almost no ground truth in the sheet (4 usable URLs in Notes),  │
+     │ so                                                                      │
+     │ Stage 5 emits a stratified sample of ~150 rows (spanning healthy and    │
+     │ marginal institutions, degree and non-degree names) for one-time human  │
+     │ labelling. Thresholds are then fitted to that sample and recorded in    │
+     │ the                                                                     │
+     │ coverage report. This is the only unavoidable human cost and it is      │
+     │ bounded.                                                                │
+     │                                                                         │
+     │ Verification                                                            │
+     │                                                                         │
+     │ Unit tests — pipeline/normalize.py and pipeline/match.py against the    │
+     │ real cases proven during planning:                                      │
+     │ - the two Data Science variants must resolve to data-science/ and       │
+     │   data-science-iy/ respectively, each with margin > 0.3                 │
+     │ - Equine Science BSc (Hons) must score the BSc page above the MSc page  │
+     │ - English Literature BA (Hons) must score 1.000 against its real title  │
+     │                                                                         │
+     │ Invariant tests — assert on full output:                                │
+     │ - no URL appears twice within one institution unless                    │
+     │   duplicate_url_collision                                               │
+     │ - every non-blank course_url has a non-blank matched_score and a status │
+     │ - every row in the input appears exactly once in the output (10,637     │
+     │   rows)                                                                 │
+     │ - no row's course_url host is outside its institution's registered host │
+     │                                                                         │
+     │ Golden end-to-end — python run.py --institution "Aberystwyth            │
+     │ University".                                                            │
+     │ This is the ideal harness: 456 rows, a known-good server-rendered       │
+     │ catalog, and                                                            │
+     │ 4 hand-verified URLs. Expect high coverage; assert ≥ 25 of the 25       │
+     │ previously                                                              │
+     │ not found rows are re-examined and that the known 4 URLs are reproduced │
+     │ exactly.                                                                │
+     │                                                                         │
+     │ Adversarial end-to-end — python run.py --institution "Abertay           │
+     │ University"                                                             │
+     │ must degrade cleanly to no_catalog rather than emitting garbage,        │
+     │ proving the                                                             │
+     │ health check works.                                                     │
+     │                                                                         │
+     │ Live spot-check — sample 50 verified rows and confirm HTTP 200 plus a   │
+     │ title containing the course name; report the measured 404 rate.         │
+     │                                                                         │
+     │ Then run full (~1–3 hours, resumable) and read coverage_report.md to    │
+     │ make the Phase 2 paid-tier decision with real numbers.                  │
+     │                                                                         │
+     │ Explicitly out of scope for Phase 1                                     │
+     │                                                                         │
+     │ Paid search API, LLM adjudication, and headless-browser rendering. Each │
+     │ is a                                                                    │
+     │ plug-in behind the Stage 2 ladder and Stage 3 adjudication hook, to be  │
+     │ enabled                                                                 │
+     │ only if coverage_report.md shows the gap justifies the spend.           │
+     ╰─────────────────────────────────────────────────────────────────────────╯
+
+✻ Baked for 8m 45s · done 3:37 PM
+
+❯ execute the plan. But before executing maintain documentation as well         
+● Executing. Starting with project structure and documentation, then building
+  stage by stage.
+
+  Read 1 file, ran 4 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Documentation in place. Now the core matching logic — the most testable piece,
+  and the one the whole design rests on.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● 21 of 22 pass. The code-stripping regex misses 7G73 — its shape is
+  digit-letter-digits, not letter-digits. Let me make it token-based instead of
+  guessing at shapes, since the real codes are 7G73, Q300, 142L, C801, D406D.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● All 22 green. Let me see the actual numbers the real implementation produces.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Correct matches now hit 1.000 with margins of +0.46 to +0.84. But look at the
+  last row: Equine Science BSc (Hons) scores 0.634 against the Data Science page
+  — inflated because both strings end in "BSc", and I'm scoring the award as
+  part of the text and applying an award penalty. That double-counts. Let me
+  decouple: compare subjects only, handle awards purely via the multiplier.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Subject-only is strictly better — correct matches hold at 1.000 while wrong
+  ones drop (0.634→0.517, 0.540→0.458). Applying it.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Two real defects surfaced: bare credential names (MBA → 0.167, IELTS → 0.341)
+  score far too low because full-string similarity punishes length asymmetry.
+  That's 132 rows. Let me add a coverage branch and strip stopwords.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● The coverage branch weakened the property that matters most — variant
+  discrimination dropped to a 0.27 margin. That's the wrong trade. Coverage
+  should apply only to genuinely terse names, not to every length asymmetry.
+
+  Ran 1 shell command (ctrl+o to expand)  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● All ten cases behave correctly now: correct matches at 1.000, decoys at
+  0.45–0.52 (below floor), bare credentials at 0.66–0.70 (review queue —
+  honest). Let me pin these as regression tests, then build the fetcher.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● 26 green. Now the polite cached fetcher.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Now the loader — CSV parsing, the 4-row repair, dedupe, and flagging.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● The repair over-merged — it consumed whole rows because some names have a (
+  that never closes. And it found 42 malformed rows, not 4, so my earlier count
+  was low. Paren-balance is the wrong anchor. Let me look at the real structure.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Important correction: those 38 rows are not malformed. They parse cleanly — 11
+  fields, institution in [2], website in [8]. Their names genuinely contain
+  unbalanced parens in the source (Journalism (Politics BA (Hons), Doctoral 
+  Degree Geography (Arts). Paren-balance detects bad names, not bad CSV
+  structure — and my detector destroyed 38 good rows.
+
+  Only 4 rows are structurally broken. Let me anchor repair on the institution
+  registry instead, and turn unbalanced parens into a name-quality flag.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Row/institution counts are correct now, but zero repairs fired and
+  unusable_website is 4 — the corrupt rows are still broken. Let me debug why
+  the anchor didn't match.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Root cause: the junk fragments  IT,  Asian Studies are themselves in the known
+  set, because I built the registry from all fields[2] values including the
+  corrupt ones — so the corrupt rows looked "already aligned." Let me build the
+  registry from values that are corroborated, and add a URL-host fallback for
+  the two rows whose institution name isn't literally present.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● All 4 repaired correctly. And note 555 institutions, not 559 — the original
+  559 included the 4 junk fragments as phantom institutions. Let me pin this
+  with tests.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● 42 green. Now the catalog extraction ladder — the largest component.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Now the decisive live test — the Aberystwyth golden case.
+
+  Ran 1 shell command (ctrl+o to expand)  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● 628 candidates for 456 rows — healthy, with levels correctly detected (409 ug
+  / 177 pg). Two defects visible: skip-nav links leaked in as candidates, and
+  names carry duration noise ((BSc, 3 years)). Let me fix both, then build the
+  matcher.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Now the matcher with constrained assignment — the piece that enforces the
+  ADR-0002 uniqueness rail.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Now the real end-to-end evaluation. The fetch cache is warm, so this rebuilds
+  free.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● 75.2% filled, but two things need investigation: 34.6% ambiguous is high, and
+  there's a visible false positive — Agriculture MAgr matched
+  /en/study-with-us/subjects/agriculture/, a subject hub page, not a course 
+  page. Let me diagnose both.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Two distinct problems, both fixable:
+
+  1. Subject hub pages tie with real course pages —
+     /en/study-with-us/subjects/accounting-finance/ scores identically to the
+     real course page. 35 candidates are subject hubs.
+  2. Candidates carrying extra qualifiers tie with exact matches — Agriculture 
+     BSc (Hons) ties between /bsc-agriculture-degree and /agriculture-top-up.
+
+  Let me fix both: a URL-specificity multiplier and an extra-token penalty.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● The extra-token penalty double-punishes terse names, where extra tokens are
+  inevitable. It should only apply when containment isn't the operative reading.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Better: confident 39%→43.2%, ambiguous 34.6%→27.2%, and the Accounting case
+  now picks the real course page. But Agriculture MAgr still lands on the
+  subject hub at confident — a wrong URL with high confidence. Let me check
+  whether a real MAgr page even exists.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Root cause found, and it's a vocabulary gap. The correct page for Agriculture 
+  MAgr is /undergraduate/mag=agriculture ("Agriculture (MAg, 4 years)") but it
+  scored only 0.388 because:
+
+  - mag isn't in my award vocabulary, so the award guard never engaged
+  - I classify MAgr as a taught masters → pg, but Aberystwyth correctly files it
+    under /undergraduate/ — MAgr is an integrated masters, an
+    undergraduate-entry 4-year degree. The level penalty then halved the correct
+    match.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● The MAgr row now correctly routes to review instead of claiming confidence —
+  but it still prefers the hub page, because MAgr and MAg are treated as
+  different awards and penalized as siblings. They're the same award, spelled
+  differently. Let me add alias canonicalization.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Two decisive validations:
+
+  - Agriculture MAgr → confident 1.000 → /undergraduate/mag=agriculture. Correct
+    page, correct level.
+  - Equine Science BSc (Hons) → no_match, and rightly so: the catalog contains
+    only Equine Science (MRes) and Equine and Veterinary Bioscience (BSc). The
+    undergraduate course no longer exists. The pipeline declined rather than
+    filing the MRes page — exactly the ADR-0001 trap, avoided, and the prior
+    manual not found note agrees.
+
+  Now the reporting layer. One important correctness point: dedupe must happen
+  before assignment, or the 704 duplicate pairs would fight each other for the
+  same URL.
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Now the orchestrator.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Dry run works (note ANU is now 409 rows — the 4 repaired rows joined it). Let
+  me run the adversarial case first: Abertay must fail closed, not emit garbage.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Abertay fails closed exactly as designed — 45 candidates for 224 rows (below
+  the 40% health ratio), so no_catalog, 0 filled, 0 garbage. Now the golden run
+  in the background, since verification serializes on one domain.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● While that runs, the remaining tests.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● 71 tests green. Now the calibration doc.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Task Output bsd1lp7k2
+  ⎿  1 institutions, 456 course rows (453 unique work items)
+       [1/1] Aberystwyth University                         cand=  626 list
+     ing          ok  filled=332/456
+     … +16 lines (ctrl+o to expand)
+
+● Background command "Golden run on Aberystwyth with verification" completed
+(exit code 0)
+
+● Golden run complete. Let me inspect what verification actually did and
+  spot-check accuracy.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Let me check the uniqueness invariant in the actual output — two rows share
+  /accounting-and-finance-degree, and I need to confirm that's the deliberate
+  duplicate-sharing path and not a rail violation.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Zero rail violations — all 3 shared URLs are flagged duplicate pairs. But two
+  of them reveal a judgment call I got wrong:
+
+  Fine Art with Art History BA (Hons) and Fine Art/Art History BA (Hons) were
+  merged as "the same work" because with is a stopword. At UK universities "X
+  with Y" (major/minor) and "X/Y" (joint honours) are often different degrees.
+  Merging them silently assumes they're identical. Given you chose the
+  precautionary rail, these should compete so the conflict surfaces in review.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+● 726 exact duplicates collapsed (matching the ~704 estimate, plus
+  case/whitespace variants). Let me re-run the golden case — the cache is warm
+  so it's fast.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Zero shared URLs — the rail holds strictly, and the rerun took 5s from cache
+  (329 cache hits, 2 requests), confirming resumability. Now let me measure
+  generalization across the top 12 institutions.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● While that runs, integration tests at the orchestrator level.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● 83 tests clean. Waiting on the generalization run.
+
+● Task Output bt5m2ebj1
+  ⎿  (No output)
+
+  Listed 1 directory (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● All 12 catalogs built; it's in the verification phase now. Let me clean up a
+  stray probe file and keep waiting.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Useful spread. 9 of 12 healthy; ACU extracted 0 candidates, ANU only 67 for
+  409 rows, Abertay 45 for 224 — all three will correctly fail closed. Let me
+  wait for final numbers.
+
+● Task Output bt5m2ebj1
+  ⎿  (No output)
+
+● Monitor(top-12 pipeline run completion)
+  ⎿  Monitor started · task b6ib40q8z · timeout 1800s
+
+● Let me audit the README against the actual CLI — I documented a --stage flag I
+  didn't implement.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Confirmed — --stage doesn't exist. Let me correct the README's usage section
+  to match reality.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Both remaining mentions are prose, not flag claims. Let me check for dead code
+  and unused imports.
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Two genuine findings: a dead function and an unused import.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Let me add the domain-containment invariant from the plan — a result URL must
+  never be outside its institution's own site.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● 86 tests pass. One real problem: catalogs cached before the domains field
+  existed would silently skip the containment check. Let me version the catalog
+  schema so stale ones rebuild (cheap — the page cache is warm).
+
+  Ran 3 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Two observations: the | tail -30 I used buffers all output (my mistake — no
+  progress visible), and the cache is already 454MB for 12 institutions, which
+  extrapolates to ~7GB for all 555. Let me add transparent gzip to the cache,
+  keeping the existing 454MB warm cache readable.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Legacy cache reads fine. Let me test the cache layer properly.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Found a real performance bug. Cache grew only 28 entries in ~2 minutes — the
+  verification phase processes targets sorted by institution, so all 8 workers
+  block on the same domain lock and throughput collapses to one domain's rate
+  (1.25 req/s instead of ~15). Let me interleave by domain.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● 106 tests pass. The running job uses the old slow path — let me stop it and
+  restart with the fix, since the warm cache makes catalog rebuild nearly free.
+
+  Ran 5 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Background command "Multi-institution generalization run" completed (exit code
+0)  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Old process is gone (the remaining match was my own grep command). Relaunching
+  with the interleaving fix, unbuffered so I can see progress.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Task Output bv4izg9k5
+  ⎿  12 institutions, 3921 course rows (3757 unique work items)
+       [1/12] Curtin University - CU                         cand=  617 lis
+     ting          ok  filled=169/390
+     … +17 lines (ctrl+o to expand)
+
+● Now I have honest generalization data, and it's a significant finding. Let me
+  wait for verification and then diagnose the poor performers.
+
+● Task Output bv4izg9k5
+  ⎿  12 institutions, 3921 course rows (3757 unique work items)
+       [1/12] Curtin University - CU                         cand=  617 lis
+     ting          ok  filled=169/390
+     … +26 lines (ctrl+o to expand)
+
+● Background command "Relaunch top-12 run with interleaving fix" completed (exit
+code 0)
+
+● Run finished in 321s — the interleaving fix cut it from a projected 36+
+  minutes to 5.4. Overall: 28.6% filled across 3,921 rows. But the spread is
+  stark: Aberystwyth 72%, Adelaide 62%, Curtin 43% — versus Coventry 4%,
+  Concordia 5%, Bond 15%. Let me diagnose Coventry.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Monitor event: "top-12 pipeline run completion"
+
+● Monitor "top-12 pipeline run completion" stream ended
+
+● Clear diagnosis: Coventry's listing crawl produced only 1 candidate — the
+  other 216 came from the sitemap and are mostly Coventry University London
+  (/cul/course-structure/) and research-centre pages. The real course pages were
+  never reached, because _COURSE_PATH requires a path segment like /courses/,
+  and Coventry uses /study-at-coventry/.... Let me confirm what a real Coventry
+  course URL looks like.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Confirmed the root cause: 188 plausible course names on Coventry's hub, and 0 
+  pass the path filter. _COURSE_PATH requires a whole segment equal to
+  courses/study, but Coventry uses /study-at-coventry/... and
+  /course-structure/.... Also visible: Coventry has an "A-Z course finder" link
+  my crawler ignores. Let me fix both.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● 106 tests pass. Let me re-extract Coventry and confirm Aberystwyth doesn't
+  regress.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Large improvement, no regression:
+
+  ┌─────────────┬────────────┬───────────┬───────────┐
+  │             │ candidates │  filled   │   rate    │
+  ├─────────────┼────────────┼───────────┼───────────┤
+  │ Coventry    │ 217 → 692  │ 20 → 190  │ 4% → 41%  │
+  ├─────────────┼────────────┼───────────┼───────────┤
+  │ Aberystwyth │ 626 → 827  │ 330 → 331 │ 72% → 73% │
+  └─────────────┴────────────┴───────────┴───────────┘
+
+  Let me verify those Coventry matches are actually right, not junk.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● The matches are genuinely correct —
+  /course-structure/ug/fbl/business-management-ba-hons/ for "BA (Hons) Business
+  Management" is exactly right. Two remaining defects visible: ?term=2026-27
+  query params split one course into several rival URLs, and
+  /undergraduate-subjects/ hub pages aren't being demoted because my hub pattern
+  needs a whole segment.
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● 110 tests pass. Now the full top-12 re-run with all fixes, to get final honest
+  numbers.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● While that runs, let me add a diagnostic I wish I'd had: a "healthy" catalog
+  with a low fill rate means extraction found the wrong pages — which is exactly
+  what Coventry looked like.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Task Output b2a94n4xb
+  ⎿  12 institutions, 3921 course rows (3757 unique work items)
+       [1/12] Curtin University - CU                         cand=  647 lis
+     ting          ok  filled=169/390
+     … +26 lines (ctrl+o to expand)
+
+● Background command "Full top-12 re-run with all fixes" completed (exit code 0)
+
+● 28.6% → 34.0%. But comparing Coventry across runs exposed a defect I need to
+  fix: it got 692 candidates/190 fills in isolation versus 493/142 here. Part is
+  a correct change (?term= collapsing), but part is that the 80-page crawl
+  budget is binding and which 80 pages get visited depends on discovery order.
+  Let me make the crawl deterministic and yield-aware.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Let me verify determinism empirically on Coventry.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Determinism confirmed — identical 455-candidate sets across runs, second run
+  needing 0 network requests. Final top-12 run to produce the deliverable
+  report.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Task Output b9nt8qfgh
+  ⎿  12 institutions, 3921 course rows (3757 unique work items)
+       [1/12] Coventry University                            cand=  455 lis
+     ting          ok  filled=117/465
+     … +17 lines (ctrl+o to expand)
+
+● Broad improvement — CDU 63→173, Curtin 169→227, Bond 25→53. Let me wait for
+  the final totals.
+
+● Task Output b9nt8qfgh
+  ⎿  12 institutions, 3921 course rows (3757 unique work items)
+       [1/12] Coventry University                            cand=  455 lis
+     ting          ok  filled=117/465
+     … +21 lines (ctrl+o to expand)
+
+● Background command "Final top-12 run producing deliverable outputs" completed
+(exit code 0)
+
+● Final: 38.8% filled (progression 28.6% → 34.0% → 38.8%), 842 rows queued for
+  review. Let me verify the invariants on the real output.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● All invariants hold — 0 failures, 46 shared URLs all correctly flagged, 0
+  off-site URLs. Let me eyeball a random sample of verified rows across
+  institutions for real accuracy, and check the report renders.
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Sample quality is high — 17 of 18 correct. One real false positive: ANU Master
+  of Philosophy (Law) → science.anu.edu.au/.../master-philosophy-mphil, which
+  is the Science faculty's MPhil page. The discipline qualifier in parentheses
+  got outweighed by the matching stem. Let me record that as a known error class
+  and check the report.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Two report-quality issues: the verified_title_score= values pollute the flag
+  histogram (844 entries), and url_claimed_by_stronger_match at 618 rows is a
+  major finding buried in a list. Let me move the live score to its own field.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Let me regenerate the outputs from cache with the cleaner schema.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Regenerated in 47s with 0 network requests — full cache replay, identical
+  results. Let me check the cleaned-up report and the review queue.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● One real definitional problem: match_margin is negative for displaced rows
+  (-0.4157). That's because the row got its second choice after a stronger row
+  claimed its best. That's informative, but it contradicts how I documented
+  margin. Let me make it explicit.
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● 112 tests pass. Let me record the measured results in the README so the docs
+  reflect reality.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● README table matches the data exactly. Final verification pass.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: /bin/sh: 1: 
+     /usr/local/etc/claude-code/hooks/audit-log.sh: not found
+
+● Done. Executed on branch feature/course-url-pipeline; processed_courses.csv is
+  confirmed byte-identical.
+
+  What's built
+
+  Documentation first, as asked: CONTEXT.md (domain glossary — Catalog,
+  Candidate, Assignment, Score, Margin, Extraction Health), three ADRs recording
+  the decisions that were genuinely hard to reverse, README.md, and
+  docs/CALIBRATION.md.
+
+  Pipeline: run.py + 6 modules, ~1,300 lines, stdlib only — no pip install, no
+  API keys, no LLM calls. 112 tests, all passing.
+
+  Measured results — and they're well below what the golden case implied
+
+  Real run over the 12 largest institutions (3,921 rows): 38.8% filled, 17.3%
+  verified, 15% ambiguous, 842 rows queued for review.
+
+  The spread is the story, and it's entirely about extraction, not matching:
+
+  ┌────────────────┬─────────────────────────────┐
+  │                │          fill rate          │
+  ├────────────────┼─────────────────────────────┤
+  │ Charles Darwin │ 79%                         │
+  ├────────────────┼─────────────────────────────┤
+  │ Aberystwyth    │ 71%                         │
+  ├────────────────┼─────────────────────────────┤
+  │ Adelaide       │ 65%                         │
+  ├────────────────┼─────────────────────────────┤
+  │ Curtin         │ 58%                         │
+  ├────────────────┼─────────────────────────────┤
+  │ …              │                             │
+  ├────────────────┼─────────────────────────────┤
+  │ ANU            │ 9%                          │
+  ├────────────────┼─────────────────────────────┤
+  │ Concordia      │ 7%                          │
+  ├────────────────┼─────────────────────────────┤
+  │ ACU            │ 0% (extracted 0 candidates) │
+  └────────────────┴─────────────────────────────┘
+
+  I want to be blunt about this: Aberystwyth at 71% was the best case, not a 
+  representative one. If I'd validated only against it, I'd have handed you a
+  misleading number.
+
+  Invariants verified on real output: 0 failures. 46 URLs are shared, every one
+  by rows flagged as genuine duplicates. Zero off-site URLs. Golden case
+  (Aberystwyth) and adversarial case (ACU → no_catalog, 0 rows filled, 0
+  garbage) both behave correctly.
+
+  Things I got wrong and corrected mid-build
+
+  - My corrupt-row detector destroyed 38 good rows. Paren-balance detects bad
+    names, not bad CSV structure. Re-anchored on the institution registry — now
+    exactly 4 rows repaired, and the real institution count is 555, not 559
+    (four were phantom fragments).
+  - A false-confident match. Agriculture MAgr was filed against a subject hub
+    page because MAgr/MAg were scored as different awards and I'd misclassified
+    MAgr as postgraduate when it's an integrated masters.
+  - Coventry filled 4% because my path filter required /courses/ as a whole
+    segment and Coventry uses /study-at-coventry/. Fixing that plus following
+    "A-Z course finder" links took it to 25–41%.
+  - A 12× performance bug: verification processed rows grouped by institution,
+    so all 8 workers blocked on one domain lock. Interleaving cut a projected 36
+    minutes to 5.
+  - Non-deterministic crawling — the same institution yielded 692 candidates one
+    run and 493 the next. Replaced the FIFO with a priority queue; now
+    byte-identical across runs.
+
+  One known error class
+
+  An 18-row audit of verified matches found 17 correct. The failure: ANU's
+  Master of Philosophy (Law) → the Science faculty's MPhil page. A parenthesised
+  discipline can be outweighed by a matching award stem. That's the residual
+  risk in verified, documented in the README.
+
+  What I did not do
+
+  - No full 555-institution run. I ran 12 (3,921 rows). The full run is python 
+    run.py; the cache makes it resumable and reruns free (44s, 0 requests).
+  - No commit — the work sits on the branch, uncommitted.
+  - Thresholds are reasoned, not fitted. calibration_sample.csv (135 rows) needs
+    human labelling before matched_score is a probability rather than a
+    ranking.
+
+  coverage_report.md flags ANU and Concordia as EXTRACTION SUSPECT — healthy
+  candidate counts but near-zero fills, meaning the crawler reached the wrong
+  pages. That's ~635 rows recoverable by fixing crawling rather than buying
+  anything, which is where I'd look before spending on Phase 2.
+
+✻ Cooked for 1h 34m 38s · done 5:12 PM
