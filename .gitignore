@@ -1,0 +1,17 @@
+# Fetch cache — large, regenerable, and machine-local. Deleting it only makes
+# the next run slower, never wrong.
+.cache/
+
+# Extracted Catalogs. Regenerable, but keeping them out of git avoids
+# committing a snapshot of 559 institutions' course listings.
+catalogs/
+
+# Pipeline outputs. The input CSV is the only data this repo tracks.
+courses_filled.csv
+review_queue.csv
+coverage_report.md
+calibration_sample.csv
+
+__pycache__/
+*.py[cod]
+.venv/
