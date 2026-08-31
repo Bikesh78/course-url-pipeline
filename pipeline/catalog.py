@@ -110,12 +110,47 @@ _LEVEL_FROM_PATH = [
 # Bumped whenever the Catalog JSON gains a field the pipeline relies on, so
 # that stale cached Catalogs are rebuilt rather than silently disabling a check.
 # v2 added `domains`, which the domain-containment rail needs.
-SCHEMA_VERSION = 2
+# v3 added `failure_reason` and `seed_yield`, which the coverage report needs to
+# tell a blocked site apart from a mistargeted crawl.
+SCHEMA_VERSION = 3
 
 # The page budget is genuinely binding for large Institutions: Coventry has 465
 # Course Rows, and a listing page yields perhaps 20-40 Candidates, so the crawl
 # must reach many listing pages. 80 was too few and made the result depend on
 # which pages happened to be discovered first.
+# Seeds that are sign-in walls rather than listings. Observed as
+# `catalogue.abertay.ac.uk/mng/login`, which answered 200 and yielded nothing.
+_AUTH_PATH = re.compile(r"/(?:login|signin|sign-in|auth|account|logon)(?:/|$)",
+                        re.IGNORECASE)
+
+# HTTP statuses that mean "we are being refused", as opposed to "wrong guess".
+_REFUSAL_STATUSES = frozenset({401, 403, 429, 451})
+_REFUSAL_SHARE = 0.8
+
+
+def classify_probes(status_counts: dict[int, int]) -> str:
+    """Read hub-probe statuses as an access verdict. Pure; no network.
+
+    Distinguishes a site that refuses the crawler from one where we simply
+    guessed the wrong paths. ACU answers 403 to all 16 hub paths, while every
+    other Institution measured returns at least three 200s — so the categories
+    are far apart on real data. The threshold is a share rather than "all", to
+    tolerate a site that leaks the odd 404 among its refusals.
+
+    Returns "blocked", "no_hub", or "" (at least one hub responded).
+    """
+    resolved = sum(status_counts.values())
+    if not resolved:
+        return ""
+    refusals = sum(n for code, n in status_counts.items()
+                   if code in _REFUSAL_STATUSES)
+    if refusals >= _REFUSAL_SHARE * resolved:
+        return "blocked"
+    if not status_counts.get(200):
+        return "no_hub"
+    return ""
+
+
 MAX_PAGES_PER_INSTITUTION = 160
 MAX_DEPTH = 2
 MIN_CANDIDATES = 5
@@ -147,6 +182,14 @@ class Catalog:
     # ANU -> study.anu.edu.au), so the permitted set is recorded at extraction
     # time rather than inferred later.
     domains: list[str] = field(default_factory=list)
+    # Why extraction fell short, when it did. Describes *extraction only* —
+    # "mistargeted" depends on the eventual fill rate and so is computed in
+    # report.py, not here.
+    failure_reason: str = ""
+    # Candidates attributed to the seed they were reached from. A seed with
+    # zero yield is the evidence that exposes a useless probe (a library
+    # catalogue, a login shell) without having to guess what it is.
+    seed_yield: dict[str, int] = field(default_factory=dict)
 
     def healthy(self, expected_rows: int) -> bool:
         """Is this Catalog plausibly complete enough to match against?
@@ -168,6 +211,8 @@ class Catalog:
             "pages_fetched": self.pages_fetched,
             "notes": self.notes,
             "domains": self.domains,
+            "failure_reason": self.failure_reason,
+            "seed_yield": self.seed_yield,
             "candidates": [{"name": c.name, "url": c.url, "level": c.level,
                             "source": c.source} for c in self.candidates],
         }
@@ -179,7 +224,9 @@ class Catalog:
                   strategy=d.get("strategy", ""),
                   pages_fetched=d.get("pages_fetched", 0),
                   notes=d.get("notes", []),
-                  domains=d.get("domains", []))
+                  domains=d.get("domains", []),
+                  failure_reason=d.get("failure_reason", ""),
+                  seed_yield=d.get("seed_yield", {}))
         cat.candidates = [Candidate(c["name"], c["url"], c.get("level"),
                                     c.get("source", "listing"))
                           for c in d.get("candidates", [])]
@@ -314,20 +361,37 @@ def _is_within(url: str, domain: str) -> bool:
 # --------------------------------------------------------------------------
 # Ladder step 1: hub probing + bounded BFS
 # --------------------------------------------------------------------------
-def find_seeds(fetcher: Fetcher, website: str) -> tuple[list[str], list[str]]:
-    """Locate an Institution's course listing roots. Returns (seeds, notes)."""
+def find_seeds(fetcher: Fetcher, website: str,
+               ) -> tuple[list[str], list[str], dict[int, int]]:
+    """Locate an Institution's course listing roots.
+
+    Returns (seeds, notes, hub_status_counts). The status histogram is the
+    evidence `classify_probes` needs; discarding it, as this used to, made a
+    site that refuses the crawler indistinguishable from one whose paths we
+    simply guessed wrong.
+    """
     seeds: list[str] = []
     notes: list[str] = []
+    hub_statuses: dict[int, int] = {}
     parts = urllib.parse.urlsplit(website)
     host = parts.netloc
     base = f"{parts.scheme or 'https'}://{host}"
     apex = re.sub(r"^www\.", "", host)
 
+    def accept(final_url: str) -> bool:
+        """Reject a seed that is a sign-in wall rather than a listing."""
+        if _AUTH_PATH.search(urllib.parse.urlsplit(final_url).path):
+            notes.append(f"rejected sign-in page as seed: {final_url}")
+            return False
+        return True
+
     for path in HUB_PATHS:
         res = fetcher.get(base + path)
+        if res.status is not None:
+            hub_statuses[res.status] = hub_statuses.get(res.status, 0) + 1
         if res.ok:
             final = clean_url(res.final_url)
-            if final and final not in seeds:
+            if final and final not in seeds and accept(final):
                 seeds.append(final)
                 if registrable(urllib.parse.urlsplit(final).netloc) != \
                         registrable(host):
@@ -337,18 +401,25 @@ def find_seeds(fetcher: Fetcher, website: str) -> tuple[list[str], list[str]]:
         res = fetcher.get(f"https://{sub}.{apex}/")
         if res.ok:
             final = clean_url(res.final_url)
-            if final and final not in seeds:
+            if final and final not in seeds and accept(final):
                 seeds.append(final)
                 notes.append(f"course subdomain {sub}.{apex} responded")
-    return seeds, notes
+    return seeds, notes, hub_statuses
 
 
 def crawl_listings(fetcher: Fetcher, seeds: list[str], domains: set[str],
                    max_pages: int = MAX_PAGES_PER_INSTITUTION,
-                   ) -> tuple[list[Candidate], int]:
-    """Bounded BFS over listing pages, harvesting (name, URL) Candidates."""
+                   ) -> tuple[list[Candidate], int, dict[str, int]]:
+    """Bounded BFS over listing pages, harvesting (name, URL) Candidates.
+
+    Returns (candidates, pages_fetched, seed_yield). Each page carries the seed
+    it descended from, so a seed that produced nothing can be reported as such
+    — that is what exposes a useless probe without having to classify what kind
+    of useless it is.
+    """
     seen_pages: set[str] = set()
     by_url: dict[str, Candidate] = {}
+    yield_by_seed: dict[str, int] = {s: 0 for s in seeds}
     fetched = 0
 
     # A deterministic priority queue rather than a FIFO. Ordering by
@@ -357,7 +428,10 @@ def crawl_listings(fetcher: Fetcher, seeds: list[str], domains: set[str],
     # order, and the same Institution produced 692 Candidates on one run and
     # 493 on the next. Priority 0 is an explicit course index, 1 a page whose
     # path looks like a listing, 2 everything else.
-    queue: list[tuple[int, int, str]] = [(1, 0, s) for s in seeds]
+    # The fourth element is the originating seed. Appending it leaves the
+    # existing (priority, depth, url) ordering untouched, so the crawl stays
+    # deterministic.
+    queue: list[tuple[int, int, str, str]] = [(1, 0, s, s) for s in seeds]
     heapq.heapify(queue)
 
     def priority_of(url: str, is_index: bool) -> int:
@@ -366,7 +440,7 @@ def crawl_listings(fetcher: Fetcher, seeds: list[str], domains: set[str],
         return 1 if _LISTING_HINT.search(urllib.parse.urlsplit(url).path) else 2
 
     while queue and fetched < max_pages:
-        _prio, depth, url = heapq.heappop(queue)
+        _prio, depth, url, origin = heapq.heappop(queue)
         url = clean_url(url)
         if not url or url in seen_pages:
             continue
@@ -386,7 +460,7 @@ def crawl_listings(fetcher: Fetcher, seeds: list[str], domains: set[str],
             # the highest priority.
             is_index = bool(_INDEX_ANCHOR.search(text or ""))
             if is_index and href not in seen_pages:
-                heapq.heappush(queue, (0, 0, href))
+                heapq.heappush(queue, (0, 0, href, origin))
                 continue
 
             if not _COURSE_PATH.search(urllib.parse.urlsplit(href).path):
@@ -396,14 +470,19 @@ def crawl_listings(fetcher: Fetcher, seeds: list[str], domains: set[str],
                 # Keep the longest anchor text seen for a URL: listing pages
                 # often link the same course from a terse card and a fuller
                 # heading.
+                if existing is None:
+                    # Credit the seed on first discovery only; a later, longer
+                    # anchor for the same URL refines the name but is not a
+                    # second find.
+                    yield_by_seed[origin] = yield_by_seed.get(origin, 0) + 1
                 if existing is None or len(text) > len(existing.name):
                     by_url[href] = Candidate(
                         name=text, url=href,
                         level=level_from_url(href) or level_of(text))
             if depth < MAX_DEPTH and href not in seen_pages:
-                heapq.heappush(queue,
-                               (priority_of(href, is_index), depth + 1, href))
-    return list(by_url.values()), fetched
+                heapq.heappush(queue, (priority_of(href, is_index),
+                                       depth + 1, href, origin))
+    return list(by_url.values()), fetched, yield_by_seed
 
 
 # --------------------------------------------------------------------------
@@ -536,15 +615,26 @@ def build_catalog(fetcher: Fetcher, institution: str, website: str,
     cat = Catalog(institution=institution)
     if not website:
         cat.strategy = "none"
+        cat.failure_reason = "no_website"
         cat.notes.append("no usable website")
         return cat
 
-    seeds, notes = find_seeds(fetcher, website)
+    seeds, notes, hub_statuses = find_seeds(fetcher, website)
     cat.seeds = seeds
     cat.notes.extend(notes)
+    access = classify_probes(hub_statuses)
+    if access:
+        cat.notes.append(
+            f"hub probe statuses: "
+            f"{', '.join(f'{k}x{v}' for k, v in sorted(hub_statuses.items()))}")
     if not seeds:
         cat.strategy = "none"
-        cat.notes.append("no hub path responded")
+        # "blocked" and "no_hub" are different problems with different fixes:
+        # one is the site refusing us, the other is us guessing wrong paths.
+        cat.failure_reason = access or "no_hub"
+        cat.notes.append(
+            "site refused every hub probe" if access == "blocked"
+            else "no hub path responded")
         return cat
 
     domains = {registrable(urllib.parse.urlsplit(s).netloc) for s in seeds}
@@ -552,9 +642,10 @@ def build_catalog(fetcher: Fetcher, institution: str, website: str,
     domains.discard("")
     cat.domains = sorted(domains)
 
-    found, fetched = crawl_listings(fetcher, seeds, domains)
+    found, fetched, seed_yield = crawl_listings(fetcher, seeds, domains)
     cat.candidates = found
     cat.pages_fetched += fetched
+    cat.seed_yield = seed_yield
     cat.strategy = "listing"
     if cat.healthy(expected_rows):
         return cat
@@ -562,7 +653,9 @@ def build_catalog(fetcher: Fetcher, institution: str, website: str,
     sm = harvest_sitemaps(fetcher, website, domains)
     if sm:
         cat.notes.append(f"sitemap contributed {len(sm)} candidates")
+        before = len(cat.candidates)
         cat.candidates = _merge(cat.candidates, sm)
+        cat.seed_yield["(sitemap)"] = len(cat.candidates) - before
         cat.strategy = "listing+sitemap"
         if cat.healthy(expected_rows):
             return cat
@@ -570,10 +663,22 @@ def build_catalog(fetcher: Fetcher, institution: str, website: str,
     js = harvest_json_endpoints(fetcher, seeds)
     if js:
         cat.notes.append(f"json endpoint contributed {len(js)} candidates")
+        before = len(cat.candidates)
         cat.candidates = _merge(cat.candidates, js)
+        cat.seed_yield["(json)"] = len(cat.candidates) - before
         cat.strategy = cat.strategy + "+json"
 
     if not cat.healthy(expected_rows):
+        # Reachable, but extraction came up short. "no_candidates" usually
+        # means a JavaScript course finder that publishes nothing in its HTML;
+        # "thin" means we found real listings but not enough of them.
+        # An access refusal outranks any downstream symptom. ACU answers 403
+        # to all 16 hub paths, yet an incidental `catalogue.` subdomain (its
+        # *library*, not its course catalog) responds 200 — so it acquires a
+        # seed and would otherwise be filed as "no_candidates", hiding the
+        # fact that the site refuses us and no crawling will ever reach it.
+        cat.failure_reason = access or (
+            "no_candidates" if len(cat.candidates) < MIN_CANDIDATES else "thin")
         cat.notes.append(
             f"extraction health failed: {len(cat.candidates)} candidates "
             f"for {expected_rows} rows")

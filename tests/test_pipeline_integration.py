@@ -85,6 +85,47 @@ class TestCatalogSchemaVersioning(unittest.TestCase):
         self.assertEqual(cat.domains, ["aber.ac.uk"])
         self.assertGreaterEqual(SCHEMA_VERSION, 2)
 
+    def test_v2_catalog_is_rebuilt_for_the_v3_fields(self):
+        """A v2 Catalog predates `failure_reason`/`seed_yield`.
+
+        Reusing it would silently report no diagnosis for an Institution that
+        does have one, which is exactly the confusion this change removes.
+        """
+        import json
+        import run as run_mod
+
+        v2 = {"schema_version": 2, "institution": ABER, "strategy": "listing",
+              "seeds": [], "domains": ["aber.ac.uk"],
+              "candidates": [{"name": "Data Science", "url": DS,
+                              "level": "ug", "source": "listing"}]}
+        built = {"called": False}
+
+        def fake_build(fetcher, institution, website, expected_rows):
+            built["called"] = True
+            return Catalog(institution, [Candidate("Data Science", DS, "ug")],
+                           strategy="listing", domains=["aber.ac.uk"],
+                           failure_reason="", seed_yield={"https://a/": 1})
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "x.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(v2, fh)
+            orig_path, orig_build = run_mod.catalog_path, run_mod.build_catalog
+            orig_dir = run_mod.CATALOG_DIR
+            run_mod.catalog_path = lambda inst: path
+            run_mod.build_catalog = fake_build
+            run_mod.CATALOG_DIR = d
+            try:
+                cat = run_mod.load_or_build_catalog(
+                    StubFetcher({}), ABER, "https://www.aber.ac.uk", 10)
+            finally:
+                run_mod.catalog_path = orig_path
+                run_mod.build_catalog = orig_build
+                run_mod.CATALOG_DIR = orig_dir
+
+        self.assertTrue(built["called"], "v2 catalog was reused, not rebuilt")
+        self.assertEqual(cat.seed_yield, {"https://a/": 1})
+
     def test_current_catalog_is_reused(self):
         import json
         import run as run_mod
@@ -92,6 +133,7 @@ class TestCatalogSchemaVersioning(unittest.TestCase):
 
         current = {"schema_version": SCHEMA_VERSION, "institution": ABER,
                    "strategy": "listing", "seeds": [], "domains": ["aber.ac.uk"],
+                   "failure_reason": "", "seed_yield": {},
                    "candidates": [{"name": "Data Science", "url": DS,
                                    "level": "ug", "source": "listing"}]}
         built = {"called": False}

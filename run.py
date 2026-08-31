@@ -130,7 +130,9 @@ def process_institution(fetcher: Fetcher, institution: str, rows: list,
                                 refresh=args.refresh_catalogs)
     healthy = cat.healthy(len(rows))
     health = {"candidates": len(cat.candidates), "strategy": cat.strategy,
-              "healthy": healthy, "notes": cat.notes, "seeds": cat.seeds}
+              "healthy": healthy, "notes": cat.notes, "seeds": cat.seeds,
+              "failure_reason": cat.failure_reason,
+              "seed_yield": cat.seed_yield}
 
     if not healthy:
         # Fail closed rather than match against a partial Catalog (ADR-0001).
@@ -138,6 +140,8 @@ def process_institution(fetcher: Fetcher, institution: str, rows: list,
         for r in rows:
             mr = MatchResult(row=r, status="no_catalog")
             mr.flags.append(f"catalog_candidates={len(cat.candidates)}")
+            if cat.failure_reason:
+                mr.flags.append(f"extraction_{cat.failure_reason}")
             out.append(mr)
         return out, health
 

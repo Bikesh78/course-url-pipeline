@@ -23,12 +23,14 @@ headline numbers and the one known error class. Don't restate them; check them.
 
 ## Git state
 
-- `main` = pipeline commit `ce28216` + transcript commit `0451aeb`. Pushed.
-- `feature/course-url-pipeline` points at `ce28216` — fully contained in `main`,
-  so it is now redundant and can be deleted.
-- The 107KB conversation transcript was committed to the repo in `0451aeb`.
-  Confirm with the user whether they want that tracked; it may have been
-  incidental.
+- Remote: `git@github.com:Bikesh78/course-url-pipeline.git`. Both branches pushed.
+- `main` = pipeline commit `ce28216` (22 files, 3,780 lines) + `9585926`
+  "Add session" (conversation transcript + this handoff file).
+- `feature/course-url-pipeline` points at `ce28216` — fully contained in
+  `main`, so it is now redundant and can be deleted.
+- The 1,885-line conversation transcript is tracked in the repo as of
+  `9585926`. Confirm with the user whether they want that tracked; it may have
+  been incidental.
 
 ## What was decided (by the user, during a grilling session)
 
@@ -68,11 +70,21 @@ both behaving correctly, all output invariants passing.
 
 ## Highest-value next work, in order
 
-1. **Fix the extraction suspects before spending any money.** ANU (409 rows,
+1. **Fix the mistargeted crawls before spending any money.** ANU (409 rows,
    9% filled) and Concordia (226 rows, 7%) both have large Catalogs but almost
-   no fills, which means the crawler reached the wrong pages. ACU extracts
-   literally zero Candidates. That is ~835 rows recoverable by crawling, not
-   purchasing. `coverage_report.md` flags this shape as `EXTRACTION SUSPECT`.
+   no fills, which means the crawler reached the wrong pages. That is ~635 rows
+   recoverable by crawling, not purchasing. `coverage_report.md` lists them
+   under **Fixable by crawling**.
+
+   **ACU is not one of them**, despite looking similar. It answers **403 to all
+   16 hub-path probes** — the site refuses the crawler outright, and its only
+   responding seed was `catalogue.acu.edu.au`, a *library* discovery system
+   rather than a course catalog. No crawl tuning recovers its 201 rows. The
+   report lists it under **Not fixable by crawling**; responding to it is a
+   policy decision (an agreement with the institution, an official feed, or a
+   different access posture), deliberately deferred until the full run shows
+   how many Institutions are affected. An earlier version of this handoff
+   wrongly grouped ACU with ANU and Concordia.
 2. **Run the full 555 Institutions** and read the resulting coverage report.
    Expect several hours; it is resumable and reruns are nearly free.
 3. **Label the calibration sample**, then record fitted thresholds in

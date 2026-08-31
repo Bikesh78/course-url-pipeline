@@ -178,26 +178,43 @@ def write_coverage_report(results: list[MatchResult], catalog_health: dict,
     a("Institutions are the unit of work: the largest 30 carry over half the "
       "rows, so a single failed Catalog is expensive. Sorted by rows at stake.")
     a("")
-    a("Candidate count is only a *proxy* for a usable Catalog. An Institution "
-      "flagged `EXTRACTION SUSPECT` passed the count check but still filled "
-      "almost nothing, which means extraction reached the wrong pages rather "
-      "than too few — the shape Coventry had when its Catalog was being built "
-      "from an unrelated sub-site's sitemap. Those rows are the cheapest "
-      "coverage available, because the fix is crawling, not spending.")
+    a("Candidate count is only a *proxy* for a usable Catalog, so this table "
+      "reports the diagnosis alongside it. The distinction that matters is "
+      "whether more crawling could help: an Institution that **refuses** the "
+      "crawler cannot be fixed by tuning the crawler, and grouping it with "
+      "Institutions whose crawl merely landed on the wrong pages sends the "
+      "next person after an unwinnable target.")
     a("")
     a("| institution | rows | candidates | strategy | healthy | filled | fill % | diagnosis |")
     a("|---|---|---|---|---|---|---|---|")
     ranked = sorted(by_inst.items(), key=lambda kv: -len(kv[1]))
-    suspect = []
+    crawlable: list[tuple[str, int, float, str]] = []
+    unreachable: list[tuple[str, int, float, str]] = []
     for inst, rs in ranked:
         h = catalog_health.get(inst, {})
         f_ = sum(1 for r in rs if r.url)
         pct = 100 * f_ / max(1, len(rs))
-        if not h.get("healthy"):
+        reason = h.get("failure_reason", "")
+        if reason == "blocked":
+            diagnosis = "**BLOCKED**"
+            unreachable.append((inst, len(rs), pct, reason))
+        elif reason == "no_website":
+            diagnosis = "**NO WEBSITE**"
+            unreachable.append((inst, len(rs), pct, reason))
+        elif reason == "no_hub":
+            diagnosis = "**NO HUB**"
+            crawlable.append((inst, len(rs), pct, reason))
+        elif reason == "no_candidates":
+            diagnosis = "**NO CANDIDATES**"
+            crawlable.append((inst, len(rs), pct, reason))
+        elif reason == "thin":
+            diagnosis = "**THIN**"
+            crawlable.append((inst, len(rs), pct, reason))
+        elif not h.get("healthy"):
             diagnosis = "no catalog"
         elif pct < 20:
-            diagnosis = "**EXTRACTION SUSPECT**"
-            suspect.append((inst, len(rs), pct))
+            diagnosis = "**MISTARGETED**"
+            crawlable.append((inst, len(rs), pct, "mistargeted"))
         elif pct < 50:
             diagnosis = "partial"
         else:
@@ -206,15 +223,68 @@ def write_coverage_report(results: list[MatchResult], catalog_health: dict,
           f"{h.get('strategy', '-')} | {'yes' if h.get('healthy') else 'NO'} | "
           f"{f_} | {pct:.0f}% | {diagnosis} |")
     a("")
-    if suspect:
-        a("### Extraction suspects")
+
+    _REASON_TEXT = {
+        "mistargeted": "Catalog passed the count check but the crawl reached "
+                       "the wrong pages",
+        "no_candidates": "hub reachable but nothing extractable — most often a "
+                         "JavaScript course finder",
+        "thin": "real listings found, but too few of them",
+        "no_hub": "site reachable, but no course listing root was located",
+        "blocked": "site refuses the crawler",
+        "no_website": "no usable website value in the input",
+    }
+
+    if crawlable:
+        a("### Fixable by crawling")
         a("")
-        a("Worth investigating before buying anything:")
+        a("These are the cheapest coverage available: the Catalog, not the "
+          "matcher, is what fell short, and no purchase is needed to improve "
+          "them.")
         a("")
-        for inst, n, pct in sorted(suspect, key=lambda t: -t[1]):
-            a(f"- **{inst}** — {n} rows, only {pct:.0f}% filled despite a "
-              f"Catalog that passed the count check.")
+        for inst, n, pct, reason in sorted(crawlable, key=lambda t: -t[1]):
+            why = _REASON_TEXT.get(reason, reason)
+            a(f"- **{inst}** — {n} rows, {pct:.0f}% filled. "
+              f"{why[:1].upper()}{why[1:]}.")
         a("")
+
+    if unreachable:
+        a("### Not fixable by crawling")
+        a("")
+        a("Crawler tuning cannot help here. A site returning 403 to a "
+          "self-identifying crawler is declining automated access; how to "
+          "respond is a policy decision — an agreement with the institution, "
+          "an official feed, or a different access posture — not a bug fix. "
+          "**Do not count these rows as recoverable by crawling.**")
+        a("")
+        for inst, n, pct, reason in sorted(unreachable, key=lambda t: -t[1]):
+            why = _REASON_TEXT.get(reason, reason)
+            a(f"- **{inst}** — {n} rows, {pct:.0f}% filled. "
+              f"{why[:1].upper()}{why[1:]}.")
+        a("")
+
+    # Seeds that produced nothing. This is what exposes a useless probe --
+    # a library catalogue, a login shell, a JS app -- as evidence rather than
+    # as a guess about what kind of page it was.
+    dead_seeds: list[tuple[str, str]] = []
+    for inst, _rs in ranked:
+        for seed, n in sorted(catalog_health.get(inst, {})
+                              .get("seed_yield", {}).items()):
+            if n == 0:
+                dead_seeds.append((inst, seed))
+    if dead_seeds:
+        a("### Seeds that yielded nothing")
+        a("")
+        a("Each of these responded and was crawled but produced no Candidates. "
+          "Recurring hosts here indicate a probe worth narrowing; a plausible "
+          "course host here indicates a listing shape the crawler cannot read.")
+        a("")
+        a("| institution | seed |")
+        a("|---|---|")
+        for inst, seed in dead_seeds:
+            a(f"| {inst} | `{seed}` |")
+        a("")
+
     a("## Phase 2 decision")
     a("")
     unresolved = total - filled

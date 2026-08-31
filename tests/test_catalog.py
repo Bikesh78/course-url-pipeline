@@ -2,10 +2,12 @@
 
 import unittest
 
+from pipeline.fetch import FetchResult
 from pipeline.catalog import (
-    Candidate, Catalog, _slug_to_name, clean_url, extract_links,
-    level_from_url, looks_like_course_name, page_heading, page_title,
-    url_specificity,
+    build_catalog,
+    SCHEMA_VERSION, Candidate, Catalog, _AUTH_PATH, _slug_to_name,
+    classify_probes, clean_url, extract_links, level_from_url,
+    looks_like_course_name, page_heading, page_title, url_specificity,
 )
 
 HTML = """
@@ -119,6 +121,126 @@ class TestUrlHandling(unittest.TestCase):
         self.assertEqual(
             _slug_to_name("https://a.ac.uk/courses/data-science-degree/"),
             "data science")
+
+
+class TestProbeClassification(unittest.TestCase):
+    """Telling "the site refuses us" apart from "we guessed wrong paths"."""
+
+    def test_acu_shape_is_blocked(self):
+        # ACU answers 403 to all 16 hub paths. This is the real observation
+        # that motivated the whole distinction.
+        self.assertEqual(classify_probes({403: 16}), "blocked")
+
+    def test_all_404_is_a_wrong_guess_not_a_refusal(self):
+        self.assertEqual(classify_probes({404: 16}), "no_hub")
+
+    def test_any_working_hub_clears_the_verdict(self):
+        # Aberystwyth's real shape: 4 hubs respond, 12 are 404.
+        self.assertEqual(classify_probes({200: 4, 404: 12}), "")
+
+    def test_other_refusal_statuses_count(self):
+        for code in (401, 429, 451):
+            self.assertEqual(classify_probes({code: 10}), "blocked", code)
+
+    def test_threshold_is_a_share_not_unanimity(self):
+        # A site that leaks one 404 among its refusals is still blocked.
+        self.assertEqual(classify_probes({403: 8, 404: 2}), "blocked")
+        self.assertEqual(classify_probes({403: 7, 404: 3}), "no_hub")
+
+    def test_no_resolved_probes_asserts_nothing(self):
+        # Every probe failed at transport level: we learned nothing, and must
+        # not claim the site blocked us.
+        self.assertEqual(classify_probes({}), "")
+
+
+class TestAuthSeedGuard(unittest.TestCase):
+    def test_login_paths_are_recognised(self):
+        # Observed: catalogue.abertay.ac.uk/mng/login answered 200 and yielded
+        # no Candidates.
+        for path in ("/mng/login", "/login/", "/signin", "/sign-in/",
+                     "/auth", "/account/"):
+            self.assertTrue(_AUTH_PATH.search(path), path)
+
+    def test_ordinary_course_paths_are_not(self):
+        for path in ("/undergraduate/data-science/", "/courses/",
+                     "/study/accounting/", "/course-structure/ug/fbl/"):
+            self.assertIsNone(_AUTH_PATH.search(path), path)
+
+
+class TestFailureReason(unittest.TestCase):
+    def _cat(self, n, reason=""):
+        return Catalog("X", [Candidate(f"Course {i} BSc", f"https://x/{i}")
+                             for i in range(n)], failure_reason=reason)
+
+    def test_round_trips_through_json_form(self):
+        cat = Catalog("X", [Candidate("A", "https://x/a", "ug", "listing")],
+                      strategy="listing", failure_reason="thin",
+                      seed_yield={"https://x/": 1, "https://y/": 0})
+        back = Catalog.from_dict(cat.as_dict())
+        self.assertEqual(back.failure_reason, "thin")
+        self.assertEqual(back.seed_yield, {"https://x/": 1, "https://y/": 0})
+
+    def test_absent_fields_default_cleanly(self):
+        # A v2 catalog read by v3 code must not explode.
+        back = Catalog.from_dict({"institution": "X", "candidates": []})
+        self.assertEqual(back.failure_reason, "")
+        self.assertEqual(back.seed_yield, {})
+
+    def test_schema_version_is_stamped(self):
+        self.assertEqual(Catalog("X").as_dict()["schema_version"],
+                         SCHEMA_VERSION)
+        self.assertGreaterEqual(SCHEMA_VERSION, 3)
+
+
+class _StubFetcher:
+    """Serves canned responses by URL predicate. No network."""
+
+    def __init__(self, rules):
+        self.rules = rules            # list of (predicate, status, body)
+
+    def get(self, url):
+        for pred, status, body in self.rules:
+            if pred(url):
+                return FetchResult(url, status, url, body)
+        return FetchResult(url, 404, url, "")
+
+    def sitemaps_from_robots(self, url):
+        return []
+
+
+class TestBlockedOutranksSymptoms(unittest.TestCase):
+    """A refused site must be reported as refused, not as its side effects.
+
+    ACU answers 403 to every hub path, but its `catalogue.` subdomain — the
+    *library*, not the course catalog — answers 200. That incidental seed made
+    the Catalog non-empty, so an earlier version filed ACU as `no_candidates`
+    and hid the access problem entirely.
+    """
+
+    def _build(self):
+        rules = [
+            (lambda u: "catalogue.acu.edu.au" in u, 200,
+             "<html><title>Australian Catholic University</title></html>"),
+            (lambda u: "www.acu.edu.au" in u, 403, ""),
+        ]
+        return build_catalog(_StubFetcher(rules), "ACU",
+                             "https://www.acu.edu.au", 201)
+
+    def test_reason_is_blocked_not_no_candidates(self):
+        cat = self._build()
+        self.assertEqual(cat.failure_reason, "blocked")
+
+    def test_the_incidental_seed_was_still_taken(self):
+        # The point is not that the seed is rejected -- it is that it does not
+        # disguise the refusal.
+        cat = self._build()
+        self.assertTrue(cat.seeds)
+        self.assertFalse(cat.healthy(201))
+
+    def test_a_site_that_merely_404s_is_not_blocked(self):
+        rules = [(lambda u: "courses.x.ac.uk" in u, 200, "<html></html>")]
+        cat = build_catalog(_StubFetcher(rules), "X", "https://www.x.ac.uk", 201)
+        self.assertNotEqual(cat.failure_reason, "blocked")
 
 
 class TestExtractionHealth(unittest.TestCase):

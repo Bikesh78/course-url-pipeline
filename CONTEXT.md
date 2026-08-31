@@ -78,6 +78,20 @@ Candidate count against that Institution's Course Row count. A failing
 Extraction Health escalates the Institution rather than emitting weak matches.
 _Avoid_: quality, completeness, coverage
 
+**Blocked Site**:
+An Institution whose Site refuses automated access, answering refusal statuses
+to every probe rather than serving pages. Distinct from a Site that merely
+defeated extraction: a Blocked Site cannot be reached by better crawling at
+all, so it is a question of access permission rather than of technique.
+_Avoid_: failed, unreachable, broken, 403
+
+**Mistargeted Crawl**:
+An extraction that passed Extraction Health yet resolved almost no Course Rows,
+because the Candidates it gathered came from the wrong part of the Site. The
+opposite failure to a thin Catalog — enough was found, but not the right
+things.
+_Avoid_: bad crawl, extraction suspect, low yield
+
 ### Review
 
 **Review Queue**:

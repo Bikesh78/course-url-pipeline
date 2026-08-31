@@ -187,15 +187,27 @@ parenthesised discipline are the residual risk in `verified`.
 everything else.** The matcher is not the bottleneck; reaching the right
 listing pages is. Aberystwyth publishes its whole catalogue as server-rendered
 listings and fills ~73% of rows. Institutions behind JavaScript course finders
-(Abertay, ACU) yield nothing at all and are reported `no_catalog`.
+(Abertay) yield nothing at all and are reported `no_catalog`. A separate class
+again simply **refuses** the crawler: ACU answers 403 to all 16 hub-path
+probes, and no crawl tuning reaches it.
 
 **Extraction Health is a proxy, not a measurement.** It compares Candidate
 count against Course Row count, which detects "found too little" but not
 "found the wrong things". Coventry once passed the count check with 217
 Candidates while filling 4% of rows, because its Catalog had been assembled
-from an unrelated sub-site's sitemap. `coverage_report.md` now flags this shape
-as `EXTRACTION SUSPECT`; treat those Institutions as a crawling bug, not a
-reason to buy a search API.
+from an unrelated sub-site's sitemap. `coverage_report.md` flags this shape as
+`MISTARGETED` and lists it under **Fixable by crawling** — a crawling bug, not
+a reason to buy a search API.
+
+**Read the report's two failure sections as different problems.** *Fixable by
+crawling* (`MISTARGETED`, `NO CANDIDATES`, `THIN`, `NO HUB`) means the Catalog
+fell short and costs nothing but effort to improve. *Not fixable by crawling*
+(`BLOCKED`, `NO WEBSITE`) means the site declines automated access; responding
+to that is a policy decision, not a bug fix, and those rows must not be counted
+as recoverable by crawling. The report also lists **seeds that yielded
+nothing**, which is how a bad probe shows itself — the `catalogue` subdomain
+probe collides with *library* catalogues at ACU, Abertay and Curtin, while
+`handbook.` is genuinely productive.
 
 **`matched_score` is not yet calibrated.** The sheet contains only four usable
 ground-truth URLs, so the thresholds are reasoned rather than fitted. Until
