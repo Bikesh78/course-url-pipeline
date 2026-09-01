@@ -45,6 +45,21 @@ _URL_IN_TEXT = re.compile(r"https?://[^\s,\"']+")
 
 @dataclass
 class CourseRow:
+    """One line of the input CSV: the unit of work, identified by `id`.
+
+    The demand side of the match — Candidates are the supply side. See
+    `CONTEXT.md` for the domain definition.
+
+    A Course Row is a *claim* that a course exists, not proof of one. Some are
+    unsatisfiable no matter how well the pipeline runs: "Equine Science BSc
+    (Hons)" is a well-formed row for a degree Aberystwyth has withdrawn, and
+    "YEAR 2" at Aintree Primary School was never a course. `no_match` is the
+    correct answer for those, and no amount of crawling or spending changes it.
+
+    `id` is never modified. The pipeline reads it, writes it back, and hangs
+    `course_url` off it — that is the mapping the output exists to provide.
+    """
+
     id: str
     name: str
     institution_name: str
@@ -65,6 +80,13 @@ class CourseRow:
 
     @property
     def prior_said_not_found(self) -> bool:
+        """Did an earlier manual pass record "not found" for this row?
+
+        Evidence, never authority. 222 rows carry this verdict and it is known
+        to be wrong often — 58 rows in the last run got a URL despite it. It is
+        reported as `prior_note_disagrees`, which measures what the manual
+        attempt missed, and it never causes a row to be skipped.
+        """
         return (self.notes or "").strip().lower() == "not found" or \
                (self.prior_web_search or "").strip().lower() == "not found"
 
@@ -266,6 +288,12 @@ def normalise_website(site: str) -> str:
 
 
 def group_by_institution(rows: list[CourseRow]) -> dict[str, list[CourseRow]]:
+    """Bucket Course Rows by Institution — the unit of parallelism.
+
+    Everything downstream is Institution-scoped: one Catalog, one crawl budget,
+    one rate-limit key, and one Assignment whose uniqueness constraint holds
+    only within the bucket.
+    """
     out: dict[str, list[CourseRow]] = defaultdict(list)
     for r in rows:
         out[r.institution_name].append(r)

@@ -26,6 +26,16 @@ PREFILTER_MIN = 0.30    # below this a pair is not worth ranking
 
 @dataclass
 class Thresholds:
+    """The three numbers that decide what happens to every Course Row.
+
+    Reasoned from observed separations, **not fitted** — the input sheet holds
+    only four usable ground-truth URLs. Until `calibration_sample.csv` is
+    labelled, read `matched_score` as a ranking rather than a probability.
+    Procedure and the caution about which guards must not be relaxed are in
+    `docs/CALIBRATION.md`. Overridable per run via --confident/--floor/
+    --min-margin.
+    """
+
     confident: float = CONFIDENT
     floor: float = FLOOR
     min_margin: float = MIN_MARGIN
@@ -33,6 +43,24 @@ class Thresholds:
 
 @dataclass
 class MatchResult:
+    """What the pipeline decided about one Course Row, and why.
+
+    Confidence is carried as three separate numbers rather than one, because
+    they fail independently:
+
+        score       how alike the two names are
+        margin      how far ahead of the best rejected Candidate
+        live_score  agreement with the live page's own heading
+
+    A perfect `score` with a zero `margin` is an unresolved choice, not a
+    confident match — which is why they are never multiplied together.
+
+    A **negative margin** is meaningful, not a bug: the row was displaced, its
+    best Candidate having gone to a stronger claim, so it holds a second
+    choice. Those rows carry `displaced_took_lower_candidate` and sort to the
+    top of the Review Queue.
+    """
+
     row: CourseRow
     candidate: Candidate | None = None
     score: float = 0.0
@@ -48,10 +76,17 @@ class MatchResult:
 
     @property
     def url(self) -> str:
+        """The assigned URL, or "" when nothing cleared the floor."""
         return self.candidate.url if self.candidate else ""
 
     @property
     def evidence(self) -> str:
+        """Human-readable justification written to `match_evidence`.
+
+        Names the Candidate matched, the live-page agreement, and the runner-up
+        it beat — so a reviewer can judge the decision without re-running
+        anything or opening the Catalog.
+        """
         if not self.candidate:
             return ""
         parts = [f"matched: {self.candidate.name}"]
@@ -64,6 +99,12 @@ class MatchResult:
 
     @property
     def needs_review(self) -> bool:
+        """Does this row belong in `review_queue.csv`?
+
+        Only the uncertain middle. `verified` is trusted, and `no_match` /
+        `no_catalog` give a reviewer nothing to arbitrate — a human cannot
+        conjure a URL the Catalog does not contain.
+        """
         return self.status in ("probable", "ambiguous")
 
 

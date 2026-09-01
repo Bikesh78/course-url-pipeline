@@ -31,10 +31,23 @@ CATALOG_DIR = "catalogs"
 
 
 def slugify(name: str) -> str:
+    """Institution name to a filesystem-safe stem for its cached Catalog.
+
+    Lossy and not reversible — "Curtin University - CU" becomes
+    "curtin-university-cu". Only ever used to name a cache file, so a collision
+    between two Institutions would mean one reusing the other's Catalog; the
+    120-character truncation in `catalog_path` makes that vanishingly unlikely
+    but not impossible.
+    """
     return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", name.lower())).strip("-")
 
 
 def catalog_path(institution: str) -> str:
+    """Where this Institution's cached Catalog lives.
+
+    Relative to the working directory, so `catalogs/` is created wherever
+    `run.py` is invoked from.
+    """
     return os.path.join(CATALOG_DIR, f"{slugify(institution)[:120]}.json")
 
 
@@ -119,6 +132,20 @@ def clone_for(res: MatchResult, row) -> MatchResult:
 
 def process_institution(fetcher: Fetcher, institution: str, rows: list,
                         th: Thresholds, args) -> tuple[list[MatchResult], dict]:
+    """Resolve one Institution end to end. The unit of parallelism.
+
+    Builds or loads the Catalog, then either fails closed or assigns. Two
+    things here are load-bearing and easy to break:
+
+    Failing closed. An unhealthy Catalog yields `no_catalog` for every row and
+    no URLs at all, rather than matching against a fragment (ADR-0001).
+
+    Deduping *before* Assignment. Duplicate Course Rows would otherwise compete
+    for the same URL under the uniqueness rail, and one would be starved of a
+    URL that is rightfully both rows' answer.
+
+    Returns (results, health) where health feeds the coverage report.
+    """
     website = normalise_website(rows[0].website)
     for r in rows:
         if not website:
@@ -163,6 +190,13 @@ def process_institution(fetcher: Fetcher, institution: str, rows: list,
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: resolve Institutions, verify, and write the outputs.
+
+    Institutions are processed concurrently, then Verification re-fetches every
+    assigned URL. That second pass is deliberately re-ordered by
+    `interleave_by_domain` — grouped by Institution it parks every worker on a
+    single domain lock and runs about twelve times slower.
+    """
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--input", default="processed_courses.csv")
     ap.add_argument("--out", default="courses_filled.csv")

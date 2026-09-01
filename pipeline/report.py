@@ -27,6 +27,12 @@ def _status_for_csv(res: MatchResult) -> str:
 
 
 def write_filled_csv(results: list[MatchResult], path: str) -> None:
+    """Write `courses_filled.csv`: every input row, plus the decision columns.
+
+    Every Course Row appears exactly once whether or not it got a URL, so the
+    output can be joined back to the input on `id` without a lookup miss.
+    `processed_courses.csv` itself is never touched.
+    """
     with open(path, "w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(OUTPUT_COLUMNS)

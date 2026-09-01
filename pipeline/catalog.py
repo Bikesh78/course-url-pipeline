@@ -1,18 +1,61 @@
 """Catalog discovery and extraction.
 
-A Catalog is always *extracted* from an Institution's own listing pages, never
-generated from a URL pattern — see ADR-0001, which records the measurement that
-disqualified generation.
+Builds an Institution's Catalog by crawling its own site. A Catalog is always
+*extracted*, never generated from a URL pattern — see ADR-0001, which records
+the measurement that disqualified generation.
 
-The ladder tries progressively less convenient sources and stops as soon as
-Extraction Health passes:
+Domain terms (Catalog, Candidate, Extraction Health) are defined in
+`CONTEXT.md`. The words below are specific to *this* crawler and are defined
+here rather than there, because they would become wrong if the extraction
+strategy were replaced, whereas the domain terms would not.
 
-  1. hub probing + bounded BFS over server-rendered listing pages
-  2. sitemap filtering (from robots.txt or the conventional locations)
-  3. the JSON endpoint behind a JavaScript course finder
+Terminology
+-----------
+**hub path**
+    A *guess*: one of `HUB_PATHS` ("/courses", "/study", ...) probed against
+    the Institution's site. Most guesses are wrong — a typical Institution
+    answers 200 to three or four of the sixteen.
+
+**seed**
+    A hub path or course subdomain that answered 200 and survived filtering.
+    Seeds are where crawling starts, and `Catalog.seed_yield` attributes
+    Candidates back to the seed they were reached from, so an unproductive
+    probe can be spotted without guessing why it was useless.
+
+**listing page**
+    Any page the crawl fetches and harvests links from. It is **not** a page
+    type the crawler recognises: every fetched page is treated identically.
+    The name describes intent, not a test — and the intent is often wrong.
+    Measured on Aberystwyth:
+
+        courses.aber.ac.uk/                        98 links,  12 course-links
+        courses.aber.ac.uk/undergraduate/data-science
+                                                  151 links,  48 course-links
+
+    The "course page" is four times richer than the "listing", because
+    universities put related-course and module lists on course pages. Harvest
+    from everything; let scoring discard the junk.
+
+**course page**
+    The destination a Candidate points at — what ends up in `course_url`.
+    A course page is also a listing page in the sense above, which is exactly
+    why no page-type test exists.
+
+**ladder**
+    The ordered fallback of extraction strategies below. Each rung is weaker
+    evidence about what a course is *called* than the one before, so the ladder
+    is climbed down only when forced, and stops the moment Extraction Health
+    passes:
+
+      1. `crawl_listings` — bounded BFS from the seeds. Names come from the
+         site's own anchor text. The good rung; all 12 current Catalogs use it.
+      2. `harvest_sitemaps` — names reverse-engineered from URL slugs, so these
+         Candidates carry `source="sitemap"` and can never reach `verified`.
+      3. `harvest_json_endpoints` — the API behind a JavaScript course finder,
+         for sites that publish nothing in their HTML.
 
 An Institution whose Catalog fails Extraction Health is reported `no_catalog`
-rather than being matched against a partial listing.
+with a `failure_reason`, rather than being matched against a partial Catalog.
 """
 
 from __future__ import annotations
@@ -159,6 +202,31 @@ HEALTH_RATIO = 0.40
 
 @dataclass
 class Candidate:
+    """One course the Institution publishes: a `(name, url)` pair we found.
+
+    The supply side of the match — Course Rows are the demand side. See
+    `CONTEXT.md` for the domain definition.
+
+    A Candidate's **identity is its URL**, not its name. That is what the
+    uniqueness rail of ADR-0002 claims: two Course Rows may not both be
+    assigned the same URL. Two Candidates sharing a URL are the same Candidate.
+
+    Attributes:
+        name: anchor text the site printed next to the link, so it carries
+            listing furniture like "(BSc, 3 years)". Normalisation strips that.
+        url: the proposed answer, and the identity.
+        level: "ug" or "pg", read from the URL path or inferred from the Award.
+            Used to stop an undergraduate row taking a postgraduate page.
+        source: where the *name* came from, which is an evidence-quality
+            marker: "listing" (anchor text, trustworthy), "sitemap" (guessed
+            from the URL slug, so demoted and never `verified`), or "json"
+            (a field in a course-finder API).
+
+    Candidates are deliberately over-collected. A Catalog contains navigation
+    ("Fees and Finance") and module names alongside real courses, because junk
+    is cheap to score away while a Candidate never collected is unrecoverable.
+    """
+
     name: str
     url: str
     level: str | None = None
@@ -166,11 +234,44 @@ class Candidate:
 
     @property
     def key(self) -> str:
+        """The Candidate's identity: its URL. See the class docstring."""
         return self.url
 
 
 @dataclass
 class Catalog:
+    """Everything one Institution publishes, as far as extraction could reach.
+
+    The **closed universe** a Course Row is resolved against: matching selects
+    from `candidates` and nothing else, which is what makes `no_match` a
+    meaningful statement ("absent from this set") rather than a shrug.
+
+    One Catalog per Institution, cached as `catalogs/<slug>.json`. Extraction
+    is the expensive stage, so persisting it lets the entire matching half of
+    the pipeline be re-run offline in seconds.
+
+    A Catalog is *not* a promise of completeness. Ten of the twelve currently
+    cached hit the `MAX_PAGES_PER_INSTITUTION` budget exactly, meaning their
+    crawls stopped when they ran out of pages to spend rather than out of
+    courses to find.
+
+    Attributes:
+        candidates: the answer space. See `Candidate`.
+        seeds: listing roots the crawl started from.
+        strategy: which ladder rungs contributed, e.g. "listing+sitemap".
+        pages_fetched: crawl cost; equal to the page budget means truncated.
+        notes: human-readable record of what happened, including failures.
+        domains: hosts this Institution may yield URLs on. Recorded at
+            extraction time because seeds legitimately redirect off the www
+            host (ANU -> study.anu.edu.au) and that is unknowable later.
+        failure_reason: why extraction fell short, if it did. Describes
+            *extraction only* — "mistargeted", which depends on the eventual
+            fill rate, is computed in report.py instead.
+        seed_yield: Candidates attributed to the seed they were reached from,
+            counting the whole BFS subtree rather than the single page. A seed
+            with zero yield is how a useless probe reveals itself.
+    """
+
     institution: str
     candidates: list[Candidate] = field(default_factory=list)
     seeds: list[str] = field(default_factory=list)
@@ -203,6 +304,7 @@ class Catalog:
         return len(self.candidates) >= HEALTH_RATIO * expected_rows
 
     def as_dict(self) -> dict:
+        """Serialise for `catalogs/<slug>.json`, stamped with SCHEMA_VERSION."""
         return {
             "schema_version": SCHEMA_VERSION,
             "institution": self.institution,
@@ -219,6 +321,12 @@ class Catalog:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Catalog":
+        """Rebuild from cached JSON, defaulting fields older versions lack.
+
+        Tolerating absent fields matters because `run.py` only rebuilds a
+        Catalog when SCHEMA_VERSION rises; anything it chooses to reuse must
+        load without exploding.
+        """
         cat = cls(institution=d.get("institution", ""),
                   seeds=d.get("seeds", []),
                   strategy=d.get("strategy", ""),
@@ -263,11 +371,22 @@ def extract_links(html: str, base_url: str) -> list[tuple[str, str]]:
 
 
 def page_title(html: str) -> str:
+    """The page's `<title>`, flattened. Empty string when absent.
+
+    Used as Verification evidence only when `<h1>` is missing, since a title
+    usually carries the Institution name and course code as noise.
+    """
     m = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
     return _text(m.group(1)) if m else ""
 
 
 def page_heading(html: str) -> str:
+    """The page's first `<h1>`, flattened. Empty string when absent.
+
+    Preferred over `<title>` for Verification: an `<h1>` is typically the bare
+    course name ("Data Science") where the title is
+    "Aberystwyth University - Data Science 7G73 BSc".
+    """
     m = re.search(r"<h1[^>]*>(.*?)</h1>", html, re.IGNORECASE | re.DOTALL)
     return _text(m.group(1)) if m else ""
 
@@ -298,6 +417,13 @@ def clean_url(url: str) -> str:
 
 
 def level_from_url(url: str) -> str | None:
+    """Read "ug"/"pg" from the URL path, or None if it says nothing.
+
+    More reliable than inferring Level from the Award, because it is the
+    Institution's own filing decision. It disagrees with the Award for
+    integrated masters — Aberystwyth files its four-year MAg under
+    /undergraduate/ — and the URL is right in that dispute.
+    """
     for pattern, lvl in _LEVEL_FROM_PATH:
         if pattern.search(url):
             return lvl
@@ -435,6 +561,13 @@ def crawl_listings(fetcher: Fetcher, seeds: list[str], domains: set[str],
     heapq.heapify(queue)
 
     def priority_of(url: str, is_index: bool) -> int:
+        """Crawl order: 0 an explicit index, 1 a listing-looking path, 2 rest.
+
+        A heuristic for spending the page budget well, never a filter — every
+        queued page is eventually fetched if budget allows. `_LISTING_HINT` is
+        imprecise on purpose and matches plenty of course pages, which is
+        harmless because those are productive to crawl anyway.
+        """
         if is_index:
             return 0
         return 1 if _LISTING_HINT.search(urllib.parse.urlsplit(url).path) else 2
@@ -505,6 +638,16 @@ def _slug_to_name(url: str) -> str:
 
 def harvest_sitemaps(fetcher: Fetcher, website: str, domains: set[str],
                      max_sitemaps: int = 25) -> list[Candidate]:
+    """Ladder rung 2: mine course URLs out of the Institution's sitemaps.
+
+    Expands sitemap indexes, keeps only course-looking paths, and derives each
+    name from the URL slug — which is why these Candidates are marked
+    `source="sitemap"` and are barred from reaching `verified`.
+
+    Weak in practice: sitemaps are frequently absent (Abertay has none),
+    trivial (Bond's holds 13 entries and no courses), or full of pages
+    indistinguishable from courses by path alone.
+    """
     parts = urllib.parse.urlsplit(website)
     base = f"{parts.scheme or 'https'}://{parts.netloc}"
     todo = list(fetcher.sitemaps_from_robots(base)) or []

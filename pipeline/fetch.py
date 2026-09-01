@@ -33,6 +33,14 @@ TIMEOUT = 20
 
 @dataclass
 class FetchResult:
+    """The outcome of one fetch, whether it succeeded or not.
+
+    Failures are first-class and are cached like successes: a 404 is a fact
+    about a URL worth remembering, and re-asking costs a request. The one
+    exception is a transport error, where `status` is None — that is probably
+    about us rather than the URL, so it is never cached.
+    """
+
     url: str
     status: int | None
     final_url: str
@@ -42,11 +50,19 @@ class FetchResult:
 
     @property
     def ok(self) -> bool:
+        """200 *and* non-empty. An empty 200 is useless to the crawler."""
         return self.status == 200 and bool(self.text)
 
 
 @dataclass
 class FetchStats:
+    """Counters for one run, reported at the end and in the coverage report.
+
+    The ratio that matters is requests against cache hits: a re-run of already
+    crawled Institutions should be almost entirely hits, and is the evidence
+    that resuming is genuinely free.
+    """
+
     requests: int = 0
     cache_hits: int = 0
     errors: int = 0
@@ -54,11 +70,18 @@ class FetchStats:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def bump(self, name: str) -> None:
+        """Increment a counter. Locked: worker threads share one instance."""
         with self.lock:
             setattr(self, name, getattr(self, name) + 1)
 
 
 def domain_of(url: str) -> str:
+    """The full host, subdomains included — "courses.aber.ac.uk".
+
+    Not the rate-limiting key. Use `registrable()` for that, or a course
+    subdomain gets its own request budget and the Institution is hit at twice
+    the intended rate.
+    """
     try:
         return urllib.parse.urlsplit(url).netloc.lower()
     except ValueError:
