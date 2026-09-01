@@ -199,3 +199,71 @@ claim.
 - **A perfect Score is not a confident match.** 1.000 against two Candidates is
   an unresolved choice; that is exactly what Margin exists to express, and why
   the two numbers are never multiplied together.
+
+---
+
+## When two Course Rows may share one URL
+
+Scoring decides *which* Candidate a row wants. A separate rule decides whether it
+may *have* it when another row already does. See
+[ADR-0004](./adr/0004-bounded-url-sharing.md) for the decision; this is the
+arithmetic.
+
+### The test
+
+`normalize.are_variant_siblings(a, b)` is true when both hold:
+
+1. `variant_stem(a) == variant_stem(b)`
+2. their Award classes intersect, or one of them has no Award at all
+
+`variant_stem()` is `normalize_name(name, drop_awards=True)` with delivery
+qualifiers then removed — `placement`, `placement year`, `sandwich`, `top up`,
+`foundation year`, `study abroad`, `year abroad`, `professional experience`,
+`industrial experience`, `blended learning`, `work experience`, `honours`.
+
+Multi-word qualifiers are stripped **before** their single-word components,
+because otherwise `(with Placement Year)` loses `placement` and keeps a stray
+`year`:
+
+| name | stem |
+|---|---|
+| `Anthropology BA (Hons)` | `anthropology` |
+| `Anthropology with Placement BA (Hons)` | `anthropology` |
+| `Archaeology and Anthropology BA (Hons)` | `archaeology anthropology` |
+| `LLM Master of Laws (with Placement Year)` | `master laws` |
+
+### Why a stem test rather than a threshold
+
+Because Score cannot do it. Both of these pairs score **0.775**:
+
+```
+Anthropology BA  vs  Anthropology with Placement BA    must share
+Anthropology BA  vs  Archaeology and Anthropology BA   must not
+```
+
+Any floor admitting the first admits the second. The stems differ, so the stem
+test separates them.
+
+### Why the Award class must also agree
+
+A page holding a BSc and an MSc of one subject is a multi-course page, not one
+course in two variants. `Mathematics BSc (Hons)` and `Mathematics MSc` share the
+stem `mathematics`, and only the Award check keeps them apart.
+
+### The cap
+
+`SHARE_CAP = 8`. Legitimate Share Groups in the data are almost all 2–3 — the
+largest observed on a real run was 4. The cap is a backstop against a stem
+collision the test does not foresee, not the primary guard: the pathological
+collapse it exists to prevent ran to 116 rows and is already rejected by the
+floor, at 0.130–0.141.
+
+### What happens on refusal
+
+The row stays **blank**, carrying `share_denied_stem_mismatch` (or
+`share_denied_cap_reached`), `denied_url=<url>` and `denied_held_by=<course_id>`.
+
+Filling it anyway would raise coverage and destroy the only interpretive
+guarantee sharing has: that a Share Group is one course in several variants. A
+reviewer could then no longer tell a legitimate group from a subject collision
+without re-reading every group by hand.

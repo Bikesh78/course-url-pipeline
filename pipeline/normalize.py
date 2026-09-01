@@ -325,6 +325,81 @@ def normalize_name(text: str, drop_awards: bool = False) -> str:
     return " ".join(tokens)
 
 
+# --------------------------------------------------------------------------
+# Variant Stem
+# --------------------------------------------------------------------------
+# Qualifiers that distinguish a *delivery variant* of one course rather than a
+# different course. Two Course Rows differing only by these are Variant
+# Siblings and may share one URL (ADR-0004).
+#
+# Order matters: multi-word qualifiers must be stripped before their
+# single-word components, or "placement year" leaves a stray "year" behind.
+_VARIANT_QUALIFIERS = [
+    r"integrated year industry",      # canonicalised by normalize_name
+    r"placement year",
+    r"year placement",
+    r"foundation year",
+    r"study abroad",
+    r"year abroad",
+    r"professional experience",
+    r"industrial experience",
+    r"blended learning",
+    r"work experience",
+    r"top up",
+    r"topup",
+    r"placement",
+    r"sandwich",
+    r"honours",
+    r"honors",
+    r"hons",
+]
+
+_VARIANT_RE = re.compile(
+    r"\b(?:" + "|".join(_VARIANT_QUALIFIERS) + r")\b", re.IGNORECASE)
+
+
+def variant_stem(name: str) -> str:
+    """The subject identity of a course, with Award and delivery variant removed.
+
+    Two Course Rows sharing a Variant Stem are Variant Siblings — the same
+    course offered differently — and are the only rows permitted to share a
+    URL. This exists because Score cannot make the distinction: measured on
+    real names, "Anthropology BA" scores 0.775 against both "Anthropology with
+    Placement BA" (a sibling, should share) and "Archaeology and Anthropology
+    BA" (a different course, must not). No threshold separates those; the stem
+    does.
+
+    >>> variant_stem("Anthropology with Placement BA (Hons)")
+    'anthropology'
+    >>> variant_stem("Archaeology and Anthropology BA (Hons)")
+    'archaeology anthropology'
+    """
+    s = normalize_name(name, drop_awards=True)
+    if not s:
+        # A name that is nothing but a credential ("MBA", "IELTS") has no
+        # subject to compare, so fall back to the award-inclusive form rather
+        # than returning "" and making every such row a mutual sibling.
+        s = normalize_name(name)
+    s = _VARIANT_RE.sub(" ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def are_variant_siblings(a: str, b: str) -> bool:
+    """Do these two course names denote the same course, delivered differently?
+
+    Requires both a matching Variant Stem and agreeing Award class: a page
+    holding a BSc and an MSc of the same subject is a multi-course page, not a
+    pair of siblings, and must not be treated as one course.
+    """
+    sa, sb = variant_stem(a), variant_stem(b)
+    if not sa or not sb or sa != sb:
+        return False
+    ca, cb = award_classes(a), award_classes(b)
+    if ca and cb and not (ca & cb):
+        return False
+    return True
+
+
 def _token_overlap(a: str, b: str) -> float:
     """Jaccard on token sets — robust to word order, unlike SequenceMatcher."""
     ta, tb = set(a.split()), set(b.split())

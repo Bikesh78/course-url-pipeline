@@ -76,8 +76,10 @@ Two guards are load-bearing and must not be relaxed to raise coverage:
 - **The Award/Level guard**, which stopped an undergraduate row taking a
   postgraduate page (`/undergraduate/equine-science/` 404s while
   `/postgraduate/equine-science/` returns 200).
-- **The uniqueness rail** of ADR-0002, which prevents two variant rows sharing
-  one URL.
+- **The Variant Stem test** of ADR-0004, which decides whether two rows may
+  share a URL. Score cannot substitute for it: `Anthropology BA` scores 0.775
+  against both `Anthropology with Placement BA` (must share) and
+  `Archaeology and Anthropology BA` (must not).
 
 Coverage bought by weakening either is not coverage; it is silent error. If
 coverage must rise, raise it by improving Catalog extraction — the

@@ -1,8 +1,14 @@
 ---
-status: accepted
+status: superseded by ADR-0004
 ---
 
 # Assignment enforces one URL per Course Row within an Institution
+
+> **Superseded by [ADR-0004](./0004-bounded-url-sharing.md).** The premise below
+> — that two Course Rows may never share a URL — is false: a single Institution
+> page can hold several courses, and `Anthropology`/`Anthropology with Placement`
+> are one page. The *reasoning* about near-miss variants still holds and is why
+> sharing is bounded rather than unrestricted, so this record is kept.
 
 Each Course Row could be matched to its best Candidate independently, which is
 simpler and embarrassingly parallel. We instead solve Assignment per

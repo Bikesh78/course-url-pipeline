@@ -24,6 +24,24 @@ class TestDomainGrouping(unittest.TestCase):
     def test_canadian_provincial_tld(self):
         self.assertEqual(registrable("www.conestogac.on.ca"), "conestogac.on.ca")
 
+    def test_three_label_public_suffix_keeps_four_labels(self):
+        """Victorian school domains: vic.edu.au is a suffix, not a domain.
+
+        Collapsing to vic.edu.au put 144 unrelated schools in one bucket, which
+        was harmless as a rate-limit key and wrong as a Catalog key.
+        """
+        self.assertEqual(registrable("barkly.vic.edu.au"), "barkly.vic.edu.au")
+        self.assertEqual(registrable("www.barkly.vic.edu.au"),
+                         "barkly.vic.edu.au")
+        self.assertEqual(registrable("x.nsw.edu.au"), "x.nsw.edu.au")
+        self.assertEqual(registrable("y.catholic.edu.au"), "y.catholic.edu.au")
+
+    def test_lookalike_three_label_domains_are_not_treated_as_suffixes(self):
+        # These are real registrable domains with a subdomain, so a blanket
+        # "three labels" rule would be wrong in the other direction.
+        self.assertEqual(registrable("x.taylors.edu.my"), "taylors.edu.my")
+        self.assertEqual(registrable("y.bcu.ac.uk"), "bcu.ac.uk")
+
     def test_plain_two_label_host(self):
         self.assertEqual(registrable("codecore.ca"), "codecore.ca")
 

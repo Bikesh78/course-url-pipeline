@@ -4,7 +4,8 @@ import os
 import unittest
 
 from pipeline.load import (
-    CourseRow, dedupe, group_by_institution, load_rows, normalise_website,
+    CourseRow, dedupe, group_by_institution, group_by_site, load_rows,
+    normalise_website,
 )
 
 CSV = "processed_courses.csv"
@@ -98,6 +99,81 @@ class TestWorkKey(unittest.TestCase):
         b = CourseRow("2", "Data Science (with integrated year in industry) "
                            "BSc (Hons)", "Aber", "https://a")
         self.assertNotEqual(a.work_key, b.work_key)
+
+
+CSV_FINAL = "final_courses.csv"
+
+
+@unittest.skipUnless(os.path.exists(CSV_FINAL), "current sheet not present")
+class TestCurrentSheet(unittest.TestCase):
+    """The sheet the pipeline now reads: 52,781 rows, 2,548 Institutions."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rows = load_rows(CSV_FINAL)
+
+    def test_every_row_survives(self):
+        self.assertEqual(len(self.rows), 52781)
+
+    def test_institution_id_is_read(self):
+        self.assertTrue(all(r.institution_id for r in self.rows))
+
+    def test_legacy_sheet_ids_are_a_strict_subset(self):
+        if not os.path.exists(CSV):
+            self.skipTest("legacy sheet not present")
+        old = {r.id for r in load_rows(CSV)}
+        new = {r.id for r in self.rows}
+        self.assertTrue(old.issubset(new))
+
+    def test_prior_urls_are_available_as_seed_material(self):
+        withprior = [r for r in self.rows if r.prior_urls]
+        self.assertGreater(len(withprior), 25000)
+        self.assertTrue(all(u.startswith("http")
+                            for r in withprior for u in r.prior_urls))
+
+    def test_prior_course_url_is_not_written_to_output(self):
+        # It is Candidate evidence, never the answer. A row carrying one must
+        # still have to earn its URL through Assignment.
+        r = next(r for r in self.rows if r.prior_course_url)
+        self.assertTrue(r.prior_course_url.startswith("http"))
+        self.assertEqual(r.raw.get("course_url"), r.prior_course_url)
+
+    def test_visa_occupation_rows_are_flagged(self):
+        occ = [r for r in self.rows
+               if "occupation_code_not_course" in r.flags]
+        self.assertGreater(len(occ), 4900)
+        self.assertIn("subclass", occ[0].name.lower())
+
+    def test_site_bucket_is_smaller_than_institution_count(self):
+        sites = group_by_site(self.rows)
+        insts = {r.institution_key for r in self.rows}
+        self.assertLess(len(sites), len(insts))
+
+    def test_case_variant_institutions_stay_distinct(self):
+        # Two Institutions differ only in name casing; lower-casing the name
+        # would merge them, the id does not.
+        keys = {r.institution_key for r in self.rows}
+        names = {r.institution_name.strip().lower() for r in self.rows}
+        self.assertGreater(len(keys), len(names))
+
+
+class TestForeignScoreGuard(unittest.TestCase):
+    """The incoming sheet scores 0-100; ours is 0-1."""
+
+    def test_detects_a_foreign_score(self):
+        from pipeline.load import incoming_score_is_foreign
+        self.assertTrue(incoming_score_is_foreign("87.1"))
+        self.assertTrue(incoming_score_is_foreign("100.0"))
+
+    def test_accepts_our_own_range(self):
+        from pipeline.load import incoming_score_is_foreign
+        self.assertFalse(incoming_score_is_foreign("0.775"))
+        self.assertFalse(incoming_score_is_foreign("1.0"))
+
+    def test_blank_is_not_foreign(self):
+        from pipeline.load import incoming_score_is_foreign
+        self.assertFalse(incoming_score_is_foreign(""))
+        self.assertFalse(incoming_score_is_foreign(None))
 
 
 if __name__ == "__main__":

@@ -88,6 +88,26 @@ def domain_of(url: str) -> str:
         return ""
 
 
+# Three-label public suffixes that appear in this dataset. Without these,
+# `barkly.vic.edu.au` collapses to `vic.edu.au` and every Victorian school
+# shares one bucket — harmless when the value is only a rate-limit key, but
+# actively wrong now that it selects a Catalog. 429 hosts across 2,660 rows are
+# affected.
+#
+# Deliberately an explicit list rather than a guess: `.taylors.edu.my` and
+# `.bcu.ac.uk` are three-label *registrable domains* with subdomains, not
+# suffixes, so a general "three labels ending in a short TLD" rule would be
+# wrong in the other direction. This is not a full Public Suffix List and does
+# not try to be.
+_THREE_LABEL_SUFFIXES = frozenset({
+    "vic.edu.au", "nsw.edu.au", "qld.edu.au", "wa.edu.au", "sa.edu.au",
+    "tas.edu.au", "act.edu.au", "nt.edu.au", "catholic.edu.au",
+    "nsw.gov.au", "vic.gov.au", "qld.gov.au", "wa.gov.au", "sa.gov.au",
+    "tas.gov.au", "act.gov.au", "nt.gov.au",
+    "on.ca", "qc.ca", "bc.ca", "ab.ca", "ns.ca", "mb.ca", "sk.ca",
+})
+
+
 def registrable(host: str) -> str:
     """Collapse subdomains so aber.ac.uk and courses.aber.ac.uk share a budget.
 
@@ -98,7 +118,10 @@ def registrable(host: str) -> str:
     parts = [p for p in host.split(".") if p]
     if len(parts) <= 2:
         return ".".join(parts)
-    # Handle multi-part TLDs like .ac.uk, .edu.au, .co.nz, .on.ca
+    # A known three-label suffix takes four labels, not three.
+    if len(parts) >= 4 and ".".join(parts[-3:]) in _THREE_LABEL_SUFFIXES:
+        return ".".join(parts[-4:])
+    # Handle multi-part TLDs like .ac.uk, .edu.au, .co.nz
     if len(parts[-1]) == 2 and len(parts[-2]) <= 3:
         return ".".join(parts[-3:])
     return ".".join(parts[-2:])

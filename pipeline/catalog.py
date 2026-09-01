@@ -67,7 +67,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 
 from pipeline.fetch import Fetcher, registrable
-from pipeline.normalize import level_of, normalize_name
+from pipeline.normalize import level_of, normalize_name, variant_stem
 
 try:
     from bs4 import BeautifulSoup
@@ -194,7 +194,28 @@ def classify_probes(status_counts: dict[int, int]) -> str:
     return ""
 
 
-MAX_PAGES_PER_INSTITUTION = 160
+MAX_PAGES_PER_INSTITUTION = 160     # retained as the default ceiling
+
+# The page budget scales with how many Course Rows a Site has to resolve. A flat
+# cap is wrong in both directions at this scale: the median Site has 5 rows and
+# would spend 160 fetches finding at most a handful of courses, while the
+# largest has 4,899 and is starved by the same number. 2,220 Sites at a flat 160
+# would be roughly 355,000 fetches, most of them on Sites with fewer than ten
+# courses.
+MIN_PAGE_BUDGET = 40
+MAX_PAGE_BUDGET = 400
+PAGES_PER_ROW = 3
+
+
+def page_budget(expected_rows: int) -> int:
+    """How many pages this Site's Catalog extraction may fetch."""
+    return max(MIN_PAGE_BUDGET,
+               min(MAX_PAGE_BUDGET, PAGES_PER_ROW * max(expected_rows, 0) + 20))
+
+# How many distinct courses one URL may contribute as Candidates. A page that
+# genuinely lists several courses is the case ADR-0004 supports; a navigation
+# block that happens to link one page under many labels is not.
+MAX_CANDIDATES_PER_URL = 12
 MAX_DEPTH = 2
 MIN_CANDIDATES = 5
 HEALTH_RATIO = 0.40
@@ -207,9 +228,11 @@ class Candidate:
     The supply side of the match — Course Rows are the demand side. See
     `CONTEXT.md` for the domain definition.
 
-    A Candidate's **identity is its URL**, not its name. That is what the
-    uniqueness rail of ADR-0002 claims: two Course Rows may not both be
-    assigned the same URL. Two Candidates sharing a URL are the same Candidate.
+    A Candidate's **identity is its URL plus its Variant Stem**, not the URL
+    alone. One Institution page can list several courses, so the same URL may
+    legitimately appear as several Candidates with different names — the change
+    ADR-0004 required. Two Candidates sharing a URL *and* a Variant Stem are
+    the same Candidate and the longer anchor text wins.
 
     Attributes:
         name: anchor text the site printed next to the link, so it carries
@@ -233,9 +256,14 @@ class Candidate:
     source: str = "listing"
 
     @property
-    def key(self) -> str:
-        """The Candidate's identity: its URL. See the class docstring."""
-        return self.url
+    def key(self) -> tuple[str, str]:
+        """The Candidate's identity: URL plus Variant Stem.
+
+        Keying on the URL alone silently discarded every course but one from a
+        page that lists several — "Anthropology" and "Anthropology with
+        Placement" on one listing collapsed before matching could see them.
+        """
+        return (self.url, variant_stem(self.name))
 
 
 @dataclass
@@ -563,7 +591,9 @@ def crawl_listings(fetcher: Fetcher, seeds: list[str], domains: set[str],
     of useless it is.
     """
     seen_pages: set[str] = set()
-    by_url: dict[str, Candidate] = {}
+    # Keyed on Candidate.key -- (url, variant stem) -- so one page may hold
+    # several courses. See Candidate's docstring.
+    by_key: dict[tuple[str, str], Candidate] = {}
     yield_by_seed: dict[str, int] = {s: 0 for s in seeds}
     fetched = 0
 
@@ -618,23 +648,74 @@ def crawl_listings(fetcher: Fetcher, seeds: list[str], domains: set[str],
             if not _COURSE_PATH.search(urllib.parse.urlsplit(href).path):
                 continue
             if looks_like_course_name(text):
-                existing = by_url.get(href)
-                # Keep the longest anchor text seen for a URL: listing pages
-                # often link the same course from a terse card and a fuller
-                # heading.
+                cand = Candidate(name=text, url=href,
+                                 level=level_from_url(href) or level_of(text))
+                ckey = cand.key
+                existing = by_key.get(ckey)
+                # Keep the longest anchor text seen for a given (URL, stem):
+                # listing pages often link the same course from a terse card
+                # and a fuller heading. A *different* stem on the same URL is a
+                # different course on a shared page and is kept separately.
                 if existing is None:
+                    if sum(1 for k in by_key if k[0] == href) >= MAX_CANDIDATES_PER_URL:
+                        # A nav-heavy page can otherwise pour dozens of
+                        # unrelated labels onto one URL.
+                        continue
                     # Credit the seed on first discovery only; a later, longer
-                    # anchor for the same URL refines the name but is not a
+                    # anchor for the same course refines the name but is not a
                     # second find.
                     yield_by_seed[origin] = yield_by_seed.get(origin, 0) + 1
                 if existing is None or len(text) > len(existing.name):
-                    by_url[href] = Candidate(
-                        name=text, url=href,
-                        level=level_from_url(href) or level_of(text))
+                    by_key[ckey] = cand
             if depth < MAX_DEPTH and href not in seen_pages:
                 heapq.heappush(queue, (priority_of(href, is_index),
                                        depth + 1, href, origin))
-    return list(by_url.values()), fetched, yield_by_seed
+    return list(by_key.values()), fetched, yield_by_seed
+
+
+# --------------------------------------------------------------------------
+# Ladder step 1b: URLs earlier work already associated with these rows
+# --------------------------------------------------------------------------
+def harvest_prior_urls(fetcher: Fetcher, prior_urls: list[str],
+                       domains: set[str],
+                       max_urls: int = 400) -> list[Candidate]:
+    """Turn URLs an earlier pipeline assigned into Candidates, named by page.
+
+    The current sheet carries 28,835 prior `course_url` values and 7,968
+    `program_link`s — 18,219 distinct URLs. They are excellent *seed material*
+    because they are mostly real course pages, so they reveal a Site's URL
+    shape for nothing.
+
+    **The name must come from the page, never from the Course Row that claimed
+    it.** Naming a prior URL after its claiming row propagates the earlier
+    pipeline's mistakes into this one: on Sydney's data, one page had been
+    assigned to five rows spanning three different courses, and naming
+    Candidates after those rows handed a Veterinary Biology row a page
+    belonging to Animal and Veterinary Bioscience. Reading the page's own
+    heading breaks that loop — the Site is the authority on what its page is.
+
+    Marked `source="prior"` so Assignment can refuse to call such a match
+    `verified`: Verification re-reads the same heading this name came from, so
+    agreement between them is circular rather than corroborating.
+    """
+    out: dict[tuple[str, str], Candidate] = {}
+    for url in prior_urls[:max_urls]:
+        url = clean_url(url)
+        if not url or not any(_is_within(url, d) for d in domains):
+            continue
+        res = fetcher.get(url)
+        if not res.ok:
+            continue
+        name = page_heading(res.text) or page_title(res.text)
+        if not name or not looks_like_course_name(name):
+            continue
+        cand = Candidate(name=name, url=url,
+                         level=level_from_url(url) or level_of(name),
+                         source="prior")
+        cur = out.get(cand.key)
+        if cur is None or len(name) > len(cur.name):
+            out[cand.key] = cand
+    return list(out.values())
 
 
 # --------------------------------------------------------------------------
@@ -772,8 +853,22 @@ def harvest_json_endpoints(fetcher: Fetcher, seeds: list[str],
 # The ladder
 # --------------------------------------------------------------------------
 def build_catalog(fetcher: Fetcher, institution: str, website: str,
-                  expected_rows: int) -> Catalog:
-    """Walk the ladder until Extraction Health passes."""
+                  expected_rows: int,
+                  prior_urls: list[str] | None = None) -> Catalog:
+    """Walk the ladder until Extraction Health passes.
+
+    `prior_urls` are URLs earlier work associated with this site's Course Rows.
+    They are used twice, and both uses are load-bearing:
+
+    As **crawl seeds**, because they name the host that actually holds the
+    courses. Path probing alone found Sydney's `short-courses` subdomain and
+    filled 9% of its rows; the prior URLs point at `sydney.edu.au/courses/`,
+    and the same rows resolve at 64% against those pages.
+
+    As **Candidates**, named from each page's own heading rather than from the
+    Course Row that claimed it — see `harvest_prior_urls` for why that
+    distinction prevents inheriting the earlier pipeline's mistakes.
+    """
     cat = Catalog(institution=institution)
     if not website:
         cat.strategy = "none"
@@ -782,6 +877,18 @@ def build_catalog(fetcher: Fetcher, institution: str, website: str,
         return cat
 
     seeds, notes, hub_statuses = find_seeds(fetcher, website)
+    # Directory parents of known course pages are listing pages far more often
+    # than a guessed hub path is, so they go in front of the probed seeds.
+    prior_urls = [u for u in (prior_urls or []) if u]
+    if prior_urls:
+        parents: list[str] = []
+        for u in prior_urls:
+            parent = clean_url(u.rsplit("/", 1)[0] + "/")
+            if parent and parent not in parents:
+                parents.append(parent)
+        seeds = parents[:12] + [s for s in seeds if s not in parents]
+        notes.append(f"{len(prior_urls)} prior URLs contributed "
+                     f"{min(len(parents), 12)} seeds")
     cat.seeds = seeds
     cat.notes.extend(notes)
     access = classify_probes(hub_statuses)
@@ -804,11 +911,20 @@ def build_catalog(fetcher: Fetcher, institution: str, website: str,
     domains.discard("")
     cat.domains = sorted(domains)
 
-    found, fetched, seed_yield = crawl_listings(fetcher, seeds, domains)
+    found, fetched, seed_yield = crawl_listings(
+        fetcher, seeds, domains, max_pages=page_budget(expected_rows))
     cat.candidates = found
     cat.pages_fetched += fetched
     cat.seed_yield = seed_yield
     cat.strategy = "listing"
+
+    if prior_urls:
+        pri = harvest_prior_urls(fetcher, prior_urls, domains)
+        if pri:
+            cat.notes.append(f"prior URLs contributed {len(pri)} candidates")
+            cat.candidates = _merge(cat.candidates, pri)
+            cat.strategy = "listing+prior"
+
     if cat.healthy(expected_rows):
         return cat
 
@@ -848,9 +964,23 @@ def build_catalog(fetcher: Fetcher, institution: str, website: str,
 
 
 def _merge(a: list[Candidate], b: list[Candidate]) -> list[Candidate]:
-    by_url = {c.url: c for c in a}
-    for c in b:
-        cur = by_url.get(c.url)
-        if cur is None or len(c.name) > len(cur.name):
-            by_url[c.url] = c
-    return list(by_url.values())
+    """Combine two Candidate lists, keyed on (URL, Variant Stem).
+
+    Keyed on URL alone this would discard the extra courses a shared page
+    holds, undoing the multi-course support ADR-0004 requires.
+    """
+    # Source quality beats name length: a name the Site printed *next to a
+    # link* in a listing is independent evidence, while one read off the target
+    # page is the same text Verification will later compare against.
+    rank = {"listing": 3, "json": 2, "prior": 1, "sitemap": 0}
+    merged: dict[tuple[str, str], Candidate] = {}
+    for c in list(a) + list(b):
+        cur = merged.get(c.key)
+        if cur is None:
+            merged[c.key] = c
+            continue
+        better_source = rank.get(c.source, 0) > rank.get(cur.source, 0)
+        same_source = rank.get(c.source, 0) == rank.get(cur.source, 0)
+        if better_source or (same_source and len(c.name) > len(cur.name)):
+            merged[c.key] = c
+    return list(merged.values())

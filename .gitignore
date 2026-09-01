@@ -6,6 +6,15 @@
 # committing a snapshot of 559 institutions' course listings.
 catalogs/
 
+# Run state and URL history. Regenerable from a run, and machine-local; the
+# CSVs are the shareable deliverable.
+pipeline.db
+pipeline.db-wal
+pipeline.db-shm
+
+# Per-run JSONL logs.
+logs/
+
 # Pipeline outputs. The input CSV is the only data this repo tracks.
 courses_filled.csv
 review_queue.csv

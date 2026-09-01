@@ -1,8 +1,13 @@
 # Course URL Pipeline
 
-Fills the `course_url` column of `processed_courses.csv` (10,637 Course Rows
-across 559 Institutions) by extracting each Institution's own course listings
-and matching Course Rows against them, with a Score and Margin on every result.
+Fills the `course_url` column of `final_courses.csv` (52,781 Course Rows across
+2,548 Institutions, grouped into 2,220 Sites) by extracting each Site's own
+course listings and matching Course Rows against them, with a Score and Margin
+on every result.
+
+The legacy `processed_courses.csv` is a strict subset — every one of its 10,637
+ids appears in the current sheet — and is still readable via `--input` for
+comparison runs.
 
 Domain vocabulary is defined in [CONTEXT.md](./CONTEXT.md). The three decisions
 that shape the architecture are recorded in [docs/adr/](./docs/adr/) — read
@@ -17,18 +22,24 @@ from patterns.
 | what happens to one row, stage by stage | [docs/WALKTHROUGH.md](./docs/WALKTHROUGH.md) |
 | how to fit the thresholds | [docs/CALIBRATION.md](./docs/CALIBRATION.md) |
 | how the crawler finds listings | the `pipeline/catalog.py` module docstring |
+| when two courses may share a URL | [docs/adr/0004-bounded-url-sharing.md](./docs/adr/0004-bounded-url-sharing.md) |
+| why results live in SQLite too | [docs/adr/0005-sqlite-for-run-state-and-url-history.md](./docs/adr/0005-sqlite-for-run-state-and-url-history.md) |
+| why crawling is per-site, not per-institution | [docs/adr/0006-the-crawl-unit-is-a-website-not-an-institution.md](./docs/adr/0006-the-crawl-unit-is-a-website-not-an-institution.md) |
 
 ## Guarantees
 
-- **`processed_courses.csv` is never written to.** It is input only.
-- **URLs are never constructed**, only selected from Institution listings
-  (ADR-0001).
-- **No URL is assigned to two Course Rows** within an Institution unless
-  explicitly flagged `duplicate_url_collision` (ADR-0002).
+- **The input sheet is never written to.** It is input only.
+- **URLs are never constructed**, only selected from Site listings (ADR-0001).
+- **A URL shared by two Course Rows always means one course in several
+  variants.** Sharing requires a matching Variant Stem and Award class, and is
+  capped; anything else is refused and recorded (ADR-0004).
 - **No paid API, no LLM, no `pip install`** — stdlib plus the already-present
   `bs4`/`lxml` (ADR-0003).
 - **Every stage is resumable.** All HTTP responses are cached under `.cache/`,
   and extracted Catalogs under `catalogs/`. An interrupted run resumes free.
+- **Every run is traceable.** A `run_id` stamps a JSONL log in `logs/` and every
+  row of `pipeline.db`, which also keeps each Course Row's URL history
+  (ADR-0005).
 
 ## Requirements
 
@@ -38,10 +49,10 @@ Python 3.10+. `bs4` and `lxml` are used where present and degraded to stdlib
 ## Usage
 
 ```bash
-# Full run over all 555 Institutions. Resumable: stop it and rerun freely.
+# Full run over all 2,220 Sites. Resumable: stop it and rerun freely.
 python run.py
 
-# Golden harness: one Institution with a known-good server-rendered Catalog
+# One Institution by name (processes its whole Site bucket)
 python run.py --institution "Aberystwyth University"
 
 # Adversarial harness: must degrade to no_catalog, not emit garbage
@@ -67,8 +78,15 @@ python run.py --confident 0.85 --floor 0.60 --min-margin 0.15
 ```
 
 Other flags: `--delay` (seconds between requests to one domain, default 1.0),
-`--workers` (concurrent Institutions, default 8), `--input`, `--out`,
-`--review-out`, `--report-out`, `--calibration-out`.
+`--workers` (concurrent Sites, default 8), `--input`, `--out`, `--review-out`,
+`--report-out`, `--calibration-out`, `--db` (SQLite path; `--db ""` disables the
+store), `--log-dir`, `--verbose` (log per-row decisions).
+
+`--limit N` takes the N largest Sites *by rows that are plausibly courses*, not
+by raw row count. The largest bucket in the sheet is 5,083 ANZSCO visa
+occupation codes on a government site, which no crawl can resolve; ranking on
+raw counts would spend the first slot on guaranteed waste. A full run still
+covers every bucket.
 
 ### Resuming
 
@@ -92,6 +110,8 @@ seconds** and 2 network requests. Delete `.cache/` to force a refetch, or pass
 | `review_queue.csv` | only rows needing human triage, worst Margin first, both competing Candidates shown side by side |
 | `coverage_report.md` | coverage %, Review Queue size, per-Institution Extraction Health — the input to the Phase 2 spend decision |
 | `calibration_sample.csv` | ~150 stratified rows for one-time human labelling to fit thresholds |
+| `pipeline.db` | run state, per-row results and URL history (ADR-0005) |
+| `logs/<run_id>.jsonl` | one JSON object per event, with `site_key`, `candidates`, `diagnosis` and friends as top-level fields |
 
 ### `matched_status` values
 
@@ -120,14 +140,28 @@ page's anchor text. Agreement between the two is what `verified` asserts.
 ### `row_flags` values
 
 Input-quality flags: `k12_institution`, `bare_credential_name`,
-`year_level_not_course`, `truncated_name`, `malformed_row_repaired`,
-`aggregator_website`, `unusable_website`.
+`year_level_not_course`, `occupation_code_not_course`, `truncated_name`,
+`malformed_row_repaired`, `aggregator_website`, `unusable_website`.
 
-Resolution flags: `url_claimed_by_stronger_match` (blank because a stronger row
-took its best URL), `displaced_took_lower_candidate`, `hub_page_match`,
-`name_from_slug`, `shared_with_duplicate_row`, `offsite_url_dropped=<host>`,
-`live_title_weaker_than_listing`, `verify_http_<code>`,
-`catalog_candidates=<n>`.
+`occupation_code_not_course` marks the 5,014 rows that are ANZSCO skilled-
+migration occupations rather than courses — "Aboriginal and Torres Strait
+Islander Health Worker - 411511 (subclass 186)". Only 33 of them carry any URL
+in the source. Without the flag, 5,000 blanks read as a crawler failure.
+
+Sharing flags (ADR-0004): `variant_sibling_share=<n>` on every row in a Share
+Group; `share_denied_stem_mismatch` or `share_denied_cap_reached` on a row
+refused a URL, always accompanied by `denied_url=<url>` and
+`denied_held_by=<course_id>` so the refusal can be judged without re-running
+anything.
+
+Evidence-quality flags: `hub_page_match` (a category page, never `verified`),
+`name_from_slug` (sitemap-derived name), `name_from_page` (name read from the
+target page, so Verification would agree with itself — never `verified`).
+
+Other resolution flags: `url_claimed_by_stronger_match`,
+`displaced_took_lower_candidate`, `shared_with_duplicate_row`,
+`offsite_url_dropped=<host>`, `live_title_weaker_than_listing`,
+`verify_http_<code>`, `catalog_candidates=<n>`.
 
 `prior_note_disagrees` is worth watching: it marks rows a previous manual pass
 recorded as `not found` where this pipeline did find a URL. That count is the
@@ -142,45 +176,38 @@ request — so the fetcher backs off rather than retrying hard.
 
 ## Measured results
 
-From a real run over the 12 largest Institutions (3,921 Course Rows, 2026-08-28,
-default thresholds). This is evidence, not a projection.
+**The figures below are from the previous sheet and are retained only as
+regression canaries. They are not a prediction for `final_courses.csv`, which is
+five times larger with a different Institution mix.** Re-measure before quoting
+any coverage number — `coverage_report.md` is the only current source.
 
-| status | rows | share |
-|---|---|---|
-| `verified` | 678 | 17.3% |
-| `probable` | 253 | 6.5% |
-| `ambiguous` | 589 | 15.0% |
-| `no_match` | 2,197 | 56.0% |
-| `no_catalog` | 201 | 5.1% |
-| `url_dead` | 3 | 0.1% |
-| **filled** | **1,523** | **38.8%** |
+From a 12-Institution run on `processed_courses.csv` (3,921 rows, 2026-08-28):
+38.8% filled; 17.3% `verified`; per-Institution fill from 79% (Charles Darwin)
+to 0% (ACU, which answers 403 to every probe). Those four canaries —
+Aberystwyth 71%, CDU 79%, Adelaide 65%, Curtin 58% — are what a change should
+not regress.
 
-Per-Institution fill rate varies by more than an order of magnitude, and
-extraction — not matching — is what separates them:
+### What sharing changed
 
-| institution | rows | candidates | filled |
-|---|---|---|---|
-| Charles Darwin University | 220 | 598 | 79% |
-| Aberystwyth University | 456 | 809 | 71% |
-| Adelaide University | 534 | 1,292 | 65% |
-| Curtin University | 390 | 867 | 58% |
-| Cardiff Metropolitan University | 208 | 471 | 35% |
-| Brunel University London | 395 | 390 | 29% |
-| Bond University | 193 | 423 | 27% |
-| Coventry University | 465 | 455 | 25% |
-| Abertay University | 224 | 226 | 21% |
-| Australian National University | 409 | 717 | 9% |
-| Concordia University | 226 | 750 | 7% |
-| Australian Catholic University | 201 | 0 | 0% |
+On real Sydney rows (709) matched against their own prior URLs, the sharing rule
+produced **76 Share Groups covering 163 rows**, every sampled one a base course
+plus its `(Honours)` or duplicate variant — for example
+`Bachelor of Languages` and `Bachelor of Languages (Honours)` on
+`.../bachelor-of-languages.html`. Under the old rail one of each pair would have
+been blanked.
 
-Two invariant checks pass on that output: **no URL is assigned to two Course
-Rows** (46 URLs are shared, every one of them by rows flagged
-`shared_with_duplicate_row`), and **no filled row points off its Institution's
-own domain**.
+### Prior URLs beat path probing, by a lot
 
-An eyeball audit of 18 randomly sampled `verified` rows across all 12
-Institutions found 17 correct. Precision on `verified` is therefore high but
-not perfect, and the observed error class is described below.
+The same 709 Sydney rows:
+
+| Catalog source | rows filled |
+|---|---|
+| hub-path probing + crawl | 67 (9.4%) |
+| the sheet's own prior URLs | 453 (63.9%) |
+
+Path probing found `short-courses.sydney.edu.au` and spent the whole budget
+there; the prior URLs point at `sydney.edu.au/courses/`. This is why prior URLs
+are now crawl seeds as well as Candidates.
 
 ## Known limitations
 
@@ -217,6 +244,15 @@ as recoverable by crawling. The report also lists **seeds that yielded
 nothing**, which is how a bad probe shows itself — the `catalogue` subdomain
 probe collides with *library* catalogues at ACU, Abertay and Curtin, while
 `handbook.` is genuinely productive.
+
+**Prior-URL fills cannot reach `verified`, so coverage and review load rise
+together.** A Candidate named from the page it points at cannot be corroborated
+by Verification, which reads that same page — agreement would be circular. Those
+matches are capped at `probable` and flagged `name_from_page`. On the Sydney run
+this meant 446 rows filled but 445 in the Review Queue and only 1 `verified`.
+That is the honest reading of the evidence available, not a defect; the way to
+convert those into `verified` is better *listing* extraction, because a listing
+name is independent of the target page.
 
 **`matched_score` is not yet calibrated.** The sheet contains only four usable
 ground-truth URLs, so the thresholds are reasoned rather than fitted. Until

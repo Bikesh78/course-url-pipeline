@@ -14,12 +14,14 @@ decision the pipeline makes is scoped to a single course row.
 _Avoid_: record, entry, item
 
 **Institution**:
-A provider of courses, keyed by `institution_name`, owning exactly one Site.
+A provider of courses, keyed by `institution_id`. The unit of *reporting*, not
+of crawling — several Institutions may share one Site.
 _Avoid_: university, provider, school, organisation
 
 **Site**:
-The institution's own web presence, rooted at a canonical host. A URL that is
-not on the institution's Site is never a valid result.
+A web presence rooted at one canonical host, and **the unit of crawling** — not
+the Institution. Several Institutions can share one Site: 165 hosts are shared
+by 455 Institutions. A URL that is not on the Site is never a valid result.
 _Avoid_: website, domain, homepage
 
 **Award**:
@@ -42,16 +44,34 @@ construct URLs.
 _Avoid_: index, course list, sitemap
 
 **Candidate**:
-One `(course name, URL)` pair from a Catalog, considered as a possible match
-for a Course Row.
+One `(course name, URL)` pair from a Catalog, considered as a possible match for
+a Course Row. Its identity is the URL *plus* the Variant Stem of its name, so
+one page listing several courses yields several Candidates.
 _Avoid_: option, result, hit
 
 **Assignment**:
-The constrained selection of at most one Candidate per Course Row, where each
-URL may be claimed by at most one Course Row within an Institution. The
-uniqueness constraint is what makes Assignment different from independent
-per-row matching.
+The constrained selection of at most one Candidate per Course Row. A URL may be
+claimed by several Course Rows, but only when they are Variant Siblings and only
+up to a cap — what makes Assignment different from matching each row
+independently.
 _Avoid_: matching, allocation, mapping
+
+**Variant Stem**:
+A course's subject identity, with its Award and any delivery variant removed.
+`Anthropology BA (Hons)` and `Anthropology with Placement BA (Hons)` share the
+Variant Stem `anthropology`; `Archaeology and Anthropology BA (Hons)` does not.
+_Avoid_: subject, base name, root
+
+**Variant Sibling**:
+One of two or more Course Rows sharing a Variant Stem and an Award class — the
+same course delivered differently. The only relationship that permits two rows
+to hold one URL.
+_Avoid_: duplicate, variant, pair
+
+**Share Group**:
+The set of Course Rows holding one URL. A Share Group always means one course in
+several variants; anything else is refused rather than filled.
+_Avoid_: cluster, collision, group
 
 **Score**:
 Normalised similarity between a Course Row's name and its Candidate's name, on
@@ -65,6 +85,17 @@ because a high Score with a low Margin is untrustworthy. A **negative** Margin
 means the Course Row was displaced: something it scored higher against was
 claimed by a stronger Assignment, so it holds a second choice.
 _Avoid_: delta, gap, difference
+
+**URL History**:
+The sequence of URLs one Course Row has held over time, with when each was first
+and last seen. Exists because a resolved URL is a snapshot with a date rather
+than a permanent fact — Institutions restructure their catalogues.
+_Avoid_: audit log, versions, changelog
+
+**Run**:
+One execution of the pipeline, identified by a `run_id` that stamps every log
+record and every stored result. The unit of reproducibility.
+_Avoid_: job, batch, execution
 
 **Verification**:
 Fetching an assigned URL and re-scoring the live page's title against the
@@ -104,6 +135,13 @@ A reason code attached to a Course Row recording something known about it that
 explains a weak or absent result — that its Institution is a primary school,
 that its name is a bare credential, that its source line was malformed.
 _Avoid_: tag, label, warning
+
+**Prior URL**:
+A URL an earlier pipeline associated with a Course Row, carried in the input
+sheet. Used as a crawl seed and, once the page has been read for its own
+heading, as a Candidate — never as the answer, and never named after the row
+that claimed it.
+_Avoid_: existing URL, old match, given URL
 
 **Prior Note**:
 An annotation left in `Notes` or `course_url_via_web_search` by an earlier

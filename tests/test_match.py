@@ -12,6 +12,8 @@ SITE = "https://www.aber.ac.uk"
 DS = "https://courses.aber.ac.uk/undergraduate/data-science/"
 DS_IY = "https://courses.aber.ac.uk/undergraduate/data-science-iy/"
 HUB = "https://www.aber.ac.uk/en/study-with-us/subjects/data-science/"
+ANTH = "https://courses.aber.ac.uk/undergraduate/anthropology/"
+MATHS = "https://courses.aber.ac.uk/undergraduate/mathematics/"
 
 
 def catalog(*cands):
@@ -22,8 +24,8 @@ def row(rid, name):
     return CourseRow(rid, name, ABER, SITE)
 
 
-class TestUniquenessRail(unittest.TestCase):
-    """Two variant rows must not both take the same URL."""
+class TestSharingRail(unittest.TestCase):
+    """Distinct courses take distinct URLs; Variant Siblings may share one."""
 
     def setUp(self):
         self.rows = [
@@ -42,7 +44,10 @@ class TestUniquenessRail(unittest.TestCase):
         self.assertEqual(urls["1"], DS)
         self.assertEqual(urls["2"], DS_IY)
 
-    def test_no_url_is_used_twice(self):
+    def test_distinct_courses_do_not_share(self):
+        # These two are NOT Variant Siblings: "integrated year in industry" is
+        # stripped as a delivery variant, but they still resolve to separate
+        # pages the Site publishes, so each must hold its own.
         res = assign(self.rows, self.cat, ABER)
         used = [r.url for r in res if r.url]
         self.assertEqual(len(used), len(set(used)))
@@ -51,21 +56,83 @@ class TestUniquenessRail(unittest.TestCase):
         res = assign(self.rows, self.cat, ABER)
         self.assertTrue(all(r.status == "confident" for r in res))
 
-    def test_two_rows_one_candidate_leaves_one_unmatched(self):
-        """Why dedupe must run before Assignment.
+    def test_identical_rows_share_rather_than_starve(self):
+        """Under ADR-0004 identical rows share; under ADR-0002 one was starved.
 
-        Identical Course Rows competing for one URL is the pathological case:
-        one wins, the other is starved. `run.py` therefore collapses duplicate
-        rows into a single representative before calling assign().
+        This is the behaviour change the sharing rail exists to produce. Dedupe
+        in `run.py` still matters — it saves scoring cycles — but it is no
+        longer what prevents a duplicate row from being left empty.
         """
         rows = [row("1", "Data Science BSc (Hons)"),
                 row("2", "Data Science BSc (Hons)")]
         cat = catalog(Candidate("Data Science (BSc, 3 years)", DS, "ug"))
         res = assign(rows, cat, ABER)
+        self.assertEqual([r.url for r in res], [DS, DS])
+        for r in res:
+            self.assertIn("variant_sibling_share=2", r.flags)
+
+    def test_placement_variant_shares_the_base_page(self):
+        """The requirement that prompted ADR-0004."""
+        rows = [row("1", "Anthropology BA (Hons)"),
+                row("2", "Anthropology with Placement BA (Hons)")]
+        cat = catalog(Candidate("Anthropology BA (Hons)", ANTH, "ug"))
+        res = assign(rows, cat, ABER)
+        self.assertEqual([r.url for r in res], [ANTH, ANTH])
+
+    def test_non_sibling_is_denied_and_records_why(self):
+        """The counterexample Score cannot separate: both pairs score 0.775."""
+        rows = [row("1", "Anthropology BA (Hons)"),
+                row("2", "Archaeology and Anthropology BA (Hons)")]
+        cat = catalog(Candidate("Anthropology BA (Hons)", ANTH, "ug"))
+        res = {r.row.id: r for r in assign(rows, cat, ABER)}
+        self.assertEqual(res["1"].url, ANTH)
+        self.assertEqual(res["2"].url, "")
+        self.assertIn("share_denied_stem_mismatch", res["2"].flags)
+        self.assertIn(f"denied_url={ANTH}", res["2"].flags)
+        self.assertIn("denied_held_by=1", res["2"].flags)
+
+    def test_award_class_mismatch_is_not_a_sibling(self):
+        # A page holding a BSc and an MSc of one subject is a multi-course
+        # page, not one course in two variants.
+        rows = [row("1", "Mathematics BSc (Hons)"),
+                row("2", "Mathematics MSc")]
+        cat = catalog(Candidate("Mathematics BSc (Hons)", MATHS, "ug"))
+        res = {r.row.id: r for r in assign(rows, cat, ABER)}
+        self.assertEqual(res["1"].url, MATHS)
+        self.assertEqual(res["2"].url, "")
+
+    def test_share_group_is_capped(self):
+        from pipeline.match import SHARE_CAP
+        rows = [row(str(i), "Data Science BSc (Hons)")
+                for i in range(SHARE_CAP + 4)]
+        cat = catalog(Candidate("Data Science (BSc, 3 years)", DS, "ug"))
+        res = assign(rows, cat, ABER)
         filled = [r for r in res if r.url]
-        self.assertEqual(len(filled), 1)
-        starved = next(r for r in res if not r.url)
-        self.assertIn("url_claimed_by_stronger_match", starved.flags)
+        self.assertEqual(len(filled), SHARE_CAP)
+        denied = [r for r in res if not r.url]
+        self.assertEqual(len(denied), 4)
+        for r in denied:
+            self.assertIn("share_denied_cap_reached", r.flags)
+
+    def test_the_116_way_collapse_cannot_reform(self):
+        """The real failure in the source sheet, as a regression test.
+
+        116 courses were collapsed onto one Master of Laws page. Our scorer
+        rates the victims 0.130-0.141 against a 0.55 floor, so they never even
+        reach the sharing rule.
+        """
+        page = "https://www.herts.ac.uk/courses/master-of-laws-llm-with-placement-year"
+        rows = [row("1", "LLM Master of Laws (with Placement Year)"),
+                row("2", "BA (Hons) 2D Digital Animation (4 Years with Placement)"),
+                row("3", "BA (Hons) Creative Writing (4 Years with Placement)")]
+        cat = Catalog("Hertfordshire",
+                      [Candidate("Master of Laws LLM with Placement Year",
+                                 page, "pg")],
+                      strategy="listing")
+        res = {r.row.id: r for r in assign(rows, cat, "University of Hertfordshire")}
+        self.assertEqual(res["1"].url, page)
+        self.assertEqual(res["2"].url, "")
+        self.assertEqual(res["3"].url, "")
 
 
 class TestStatusAssignment(unittest.TestCase):

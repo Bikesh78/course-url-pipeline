@@ -155,7 +155,7 @@ def write_coverage_report(results: list[MatchResult], catalog_health: dict,
     starved = sum(1 for r in results
                   if "url_claimed_by_stronger_match" in r.flags)
     a(f"- Rows left blank because their best URL went to a stronger claim: "
-      f"**{starved}** — the uniqueness rail of ADR-0002 doing its job. These "
+      f"**{starved}** — the sharing rail of ADR-0004 doing its job. These "
       f"are Course Rows the Institution does not list as separate pages "
       f"(variants such as `X`, `X (Top-Up)`, `X with foundation year`), so a "
       f"search API will not resolve them either.")
@@ -168,6 +168,47 @@ def write_coverage_report(results: list[MatchResult], catalog_health: dict,
               "url_dead"):
         v = status.get(k, 0)
         a(f"| `{k}` | {v} | {100 * v / max(1, total):.1f}% |")
+    a("")
+    a("## URL sharing")
+    a("")
+    a("A shared URL always means **one course in several variants** — matching "
+      "Variant Stem and Award class, capped per URL. A row refused a "
+      "non-sibling's URL is left blank and records which URL it wanted and who "
+      "holds it, so the refusal is reviewable rather than mysterious "
+      "([ADR-0004](docs/adr/0004-bounded-url-sharing.md)).")
+    a("")
+    groups: dict[str, list[MatchResult]] = defaultdict(list)
+    for r in results:
+        if r.url:
+            groups[r.url].append(r)
+    shared = {u: g for u, g in groups.items() if len(g) > 1}
+    sizes = Counter(len(g) for g in shared.values())
+    denied_stem = sum(1 for r in results
+                      if "share_denied_stem_mismatch" in r.flags)
+    denied_cap = sum(1 for r in results
+                     if "share_denied_cap_reached" in r.flags)
+    a(f"- URLs held by more than one Course Row: **{len(shared)}**")
+    a(f"- Course Rows in a Share Group: "
+      f"**{sum(len(g) for g in shared.values())}**")
+    a(f"- Rows refused because the holder was not a Variant Sibling: "
+      f"**{denied_stem}**")
+    if denied_cap:
+        a(f"- Rows refused because the Share Group was at its cap: "
+          f"**{denied_cap}**")
+    if sizes:
+        a("")
+        a("| courses per shared URL | URLs |")
+        a("|---|---|")
+        for size in sorted(sizes):
+            a(f"| {size} | {sizes[size]} |")
+    if shared:
+        a("")
+        a("Largest Share Groups:")
+        a("")
+        for url, group in sorted(shared.items(), key=lambda kv: -len(kv[1]))[:5]:
+            a(f"- `{url}`")
+            for r in group[:6]:
+                a(f"  - {r.row.name}")
     a("")
     a("## Row flags")
     a("")

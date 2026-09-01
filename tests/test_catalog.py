@@ -10,6 +10,8 @@ from pipeline.catalog import (
     looks_like_course_name, page_heading, page_title, url_specificity,
 )
 
+ANTH = "https://courses.aber.ac.uk/undergraduate/anthropology/"
+
 HTML = """
 <html><head><title>Aberystwyth University - Data Science 7G73 BSc</title></head>
 <body>
@@ -64,6 +66,114 @@ class TestCourseNameFilter(unittest.TestCase):
     def test_keeps_bare_credentials(self):
         self.assertTrue(looks_like_course_name("MBA"))
         self.assertTrue(looks_like_course_name("IELTS"))
+
+
+class TestMultiCoursePages(unittest.TestCase):
+    """One Institution page can list several courses (ADR-0004)."""
+
+    def test_candidate_identity_includes_the_variant_stem(self):
+        a = Candidate("Anthropology BA (Hons)", ANTH, "ug")
+        b = Candidate("Anthropology with Placement BA (Hons)", ANTH, "ug")
+        c = Candidate("Archaeology and Anthropology BA (Hons)", ANTH, "ug")
+        # Siblings collapse to one Candidate...
+        self.assertEqual(a.key, b.key)
+        # ...but a genuinely different course on the same page does not.
+        self.assertNotEqual(a.key, c.key)
+
+    def test_merge_keeps_several_courses_from_one_url(self):
+        from pipeline.catalog import _merge
+        first = [Candidate("Anthropology BA (Hons)", ANTH, "ug")]
+        second = [Candidate("Archaeology and Anthropology BA (Hons)", ANTH, "ug")]
+        merged = _merge(first, second)
+        self.assertEqual(len(merged), 2)
+        self.assertEqual({c.url for c in merged}, {ANTH})
+
+    def test_merge_still_collapses_the_same_course(self):
+        from pipeline.catalog import _merge
+        terse = [Candidate("Anthropology", ANTH, "ug")]
+        fuller = [Candidate("Anthropology BA (Hons)", ANTH, "ug")]
+        merged = _merge(terse, fuller)
+        self.assertEqual(len(merged), 1)
+        # The longer anchor text wins.
+        self.assertEqual(merged[0].name, "Anthropology BA (Hons)")
+
+
+class _PageFetcher:
+    """Serves canned pages keyed by exact URL, recording what was requested."""
+
+    def __init__(self, pages):
+        self.pages = pages
+        self.asked = []
+
+    def get(self, url):
+        """Return the canned page for *url*, or a 404."""
+        self.asked.append(url)
+        status, text = self.pages.get(url, (404, ""))
+        return FetchResult(url, status, url, text)
+
+    def sitemaps_from_robots(self, url):
+        """No sitemaps in this stub."""
+        return []
+
+
+class TestPriorUrlHarvesting(unittest.TestCase):
+    """Prior URLs are seed material, named by the page, never by the claimer."""
+
+    def test_name_comes_from_the_page_not_the_caller(self):
+        from pipeline.catalog import harvest_prior_urls
+        f = _PageFetcher({ANTH: (200, "<h1>Anthropology BA (Hons)</h1>")})
+        got = harvest_prior_urls(f, [ANTH], {"aber.ac.uk"})
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0].name, "Anthropology BA (Hons)")
+        self.assertEqual(got[0].source, "prior")
+
+    def test_falls_back_to_title_without_a_heading(self):
+        from pipeline.catalog import harvest_prior_urls
+        f = _PageFetcher({ANTH: (200, "<title>Anthropology BA</title>")})
+        got = harvest_prior_urls(f, [ANTH], {"aber.ac.uk"})
+        self.assertEqual(got[0].name, "Anthropology BA")
+
+    def test_dead_prior_url_yields_nothing(self):
+        from pipeline.catalog import harvest_prior_urls
+        got = harvest_prior_urls(_PageFetcher({}), [ANTH], {"aber.ac.uk"})
+        self.assertEqual(got, [])
+
+    def test_offsite_prior_url_is_not_fetched(self):
+        from pipeline.catalog import harvest_prior_urls
+        f = _PageFetcher({})
+        harvest_prior_urls(f, ["https://shorelight.com/x/"], {"aber.ac.uk"})
+        self.assertEqual(f.asked, [])
+
+    def test_a_navigation_heading_is_rejected(self):
+        from pipeline.catalog import harvest_prior_urls
+        f = _PageFetcher({ANTH: (200, "<h1>Apply now</h1>")})
+        self.assertEqual(harvest_prior_urls(f, [ANTH], {"aber.ac.uk"}), [])
+
+
+class TestSourcePreference(unittest.TestCase):
+    def test_listing_name_beats_a_page_derived_one(self):
+        """A listing name is independent evidence; a page name is not.
+
+        Verification re-reads the page, so a page-derived name would agree with
+        itself. Keeping the listing name preserves the corroboration that
+        `verified` claims.
+        """
+        from pipeline.catalog import _merge
+        listing = [Candidate("Anthropology (BA, 3 years)", ANTH, "ug",
+                             source="listing")]
+        prior = [Candidate("Anthropology with Placement BA (Hons)", ANTH,
+                           "ug", source="prior")]
+        merged = _merge(prior, listing)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].source, "listing")
+
+    def test_prior_name_beats_a_sitemap_slug(self):
+        from pipeline.catalog import _merge
+        slug = [Candidate("anthropology", ANTH, "ug", source="sitemap")]
+        prior = [Candidate("Anthropology BA (Hons)", ANTH, "ug",
+                           source="prior")]
+        merged = _merge(slug, prior)
+        self.assertEqual(merged[0].source, "prior")
 
 
 class TestUrlHandling(unittest.TestCase):
@@ -241,6 +351,29 @@ class TestBlockedOutranksSymptoms(unittest.TestCase):
         rules = [(lambda u: "courses.x.ac.uk" in u, 200, "<html></html>")]
         cat = build_catalog(_StubFetcher(rules), "X", "https://www.x.ac.uk", 201)
         self.assertNotEqual(cat.failure_reason, "blocked")
+
+
+class TestPageBudget(unittest.TestCase):
+    """The crawl budget scales with the rows a Site has to resolve."""
+
+    def test_a_tiny_site_gets_the_floor_not_the_ceiling(self):
+        from pipeline.catalog import page_budget, MIN_PAGE_BUDGET
+        # The median Site has 5 rows. A flat 160-page budget across 2,220 Sites
+        # would be ~355,000 fetches, mostly on Sites like this one.
+        self.assertEqual(page_budget(5), MIN_PAGE_BUDGET)
+
+    def test_a_large_site_is_capped(self):
+        from pipeline.catalog import page_budget, MAX_PAGE_BUDGET
+        self.assertEqual(page_budget(4899), MAX_PAGE_BUDGET)
+
+    def test_budget_grows_with_rows_in_between(self):
+        from pipeline.catalog import page_budget
+        self.assertLess(page_budget(20), page_budget(100))
+
+    def test_zero_and_negative_rows_are_safe(self):
+        from pipeline.catalog import page_budget, MIN_PAGE_BUDGET
+        self.assertEqual(page_budget(0), MIN_PAGE_BUDGET)
+        self.assertEqual(page_budget(-5), MIN_PAGE_BUDGET)
 
 
 class TestExtractionHealth(unittest.TestCase):

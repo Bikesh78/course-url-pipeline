@@ -14,14 +14,17 @@ import json
 import os
 import re
 import sys
+import logging
 import time
 import urllib.parse
 
 from pipeline.catalog import (SCHEMA_VERSION, Catalog, build_catalog,
                               page_heading, page_title)
 from pipeline.fetch import Fetcher, registrable
-from pipeline.load import (dedupe, group_by_institution, load_rows,
-                           normalise_website)
+from pipeline.logging_setup import setup_logging
+from pipeline.store import DEFAULT_DB, Store, new_run_id
+from pipeline.load import (DEFAULT_INPUT, dedupe, group_by_site, load_rows,
+                           normalise_website, site_display_name)
 from pipeline.match import MatchResult, Thresholds, assign
 from pipeline.normalize import score as score_pair
 from pipeline.report import (write_calibration_sample, write_coverage_report,
@@ -42,17 +45,18 @@ def slugify(name: str) -> str:
     return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", name.lower())).strip("-")
 
 
-def catalog_path(institution: str) -> str:
+def catalog_path(site_key: str) -> str:
     """Where this Institution's cached Catalog lives.
 
     Relative to the working directory, so `catalogs/` is created wherever
     `run.py` is invoked from.
     """
-    return os.path.join(CATALOG_DIR, f"{slugify(institution)[:120]}.json")
+    return os.path.join(CATALOG_DIR, f"{slugify(site_key)[:120]}.json")
 
 
 def load_or_build_catalog(fetcher: Fetcher, institution: str, website: str,
-                          expected_rows: int, refresh: bool = False) -> Catalog:
+                          expected_rows: int, refresh: bool = False,
+                          prior_urls: list[str] | None = None) -> Catalog:
     """Catalogs are cached on disk: extraction is the expensive stage."""
     path = catalog_path(institution)
     if not refresh and os.path.exists(path):
@@ -66,7 +70,8 @@ def load_or_build_catalog(fetcher: Fetcher, institution: str, website: str,
                 return Catalog.from_dict(data)
         except (OSError, ValueError):
             pass
-    cat = build_catalog(fetcher, institution, website, expected_rows)
+    cat = build_catalog(fetcher, institution, website, expected_rows,
+                        prior_urls=prior_urls)
     os.makedirs(CATALOG_DIR, exist_ok=True)
     try:
         with open(path, "w", encoding="utf-8") as fh:
@@ -130,9 +135,14 @@ def clone_for(res: MatchResult, row) -> MatchResult:
     return out
 
 
-def process_institution(fetcher: Fetcher, institution: str, rows: list,
-                        th: Thresholds, args) -> tuple[list[MatchResult], dict]:
-    """Resolve one Institution end to end. The unit of parallelism.
+def process_site(fetcher: Fetcher, site_key: str, rows: list,
+                 th: Thresholds, args) -> tuple[list[MatchResult], dict]:
+    """Resolve one **site** end to end. The unit of parallelism.
+
+    The bucket is a website host rather than an Institution: 165 hosts are
+    shared by 455 Institutions covering 12,927 rows, so per-Institution
+    buckets would crawl one site many times and split its Candidates between
+    the copies.
 
     Builds or loads the Catalog, then either fails closed or assigns. Two
     things here are load-bearing and easy to break:
@@ -140,21 +150,30 @@ def process_institution(fetcher: Fetcher, institution: str, rows: list,
     Failing closed. An unhealthy Catalog yields `no_catalog` for every row and
     no URLs at all, rather than matching against a fragment (ADR-0001).
 
-    Deduping *before* Assignment. Duplicate Course Rows would otherwise compete
-    for the same URL under the uniqueness rail, and one would be starved of a
-    URL that is rightfully both rows' answer.
+    Deduping *before* Assignment. It no longer prevents starvation — Variant
+    Siblings share a URL now — but it still saves scoring cycles, which matters
+    at 52,781 rows.
 
     Returns (results, health) where health feeds the coverage report.
     """
-    website = normalise_website(rows[0].website)
+    institution = site_display_name(rows)
+    website = ""
     for r in rows:
-        if not website:
-            website = normalise_website(r.website)
-            if website:
-                break
+        website = normalise_website(r.website)
+        if website:
+            break
 
-    cat = load_or_build_catalog(fetcher, institution, website, len(rows),
-                                refresh=args.refresh_catalogs)
+    # Distinct prior URLs for this site, most-repeated first: a URL several
+    # rows already point at is more likely to be a real course page.
+    counts: dict[str, int] = {}
+    for r in rows:
+        for u in r.prior_urls:
+            counts[u] = counts.get(u, 0) + 1
+    prior = sorted(counts, key=lambda u: (-counts[u], u))
+
+    cat = load_or_build_catalog(fetcher, site_key, website, len(rows),
+                                refresh=args.refresh_catalogs,
+                                prior_urls=prior)
     healthy = cat.healthy(len(rows))
     health = {"candidates": len(cat.candidates), "strategy": cat.strategy,
               "healthy": healthy, "notes": cat.notes, "seeds": cat.seeds,
@@ -198,7 +217,9 @@ def main(argv: list[str] | None = None) -> int:
     single domain lock and runs about twelve times slower.
     """
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--input", default="processed_courses.csv")
+    ap.add_argument("--input", default=DEFAULT_INPUT,
+                    help="course sheet to read; the legacy "
+                         "processed_courses.csv is still accepted")
     ap.add_argument("--out", default="courses_filled.csv")
     ap.add_argument("--review-out", default="review_queue.csv")
     ap.add_argument("--report-out", default="coverage_report.md")
@@ -215,6 +236,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--refresh-catalogs", action="store_true")
     ap.add_argument("--offline", action="store_true",
                     help="use only the fetch cache; never hit the network")
+    ap.add_argument("--db", default=DEFAULT_DB,
+                    help="SQLite file for run state and URL history; "
+                         "'' disables the store")
+    ap.add_argument("--log-dir", default="logs",
+                    help="directory for per-run JSONL logs")
+    ap.add_argument("--verbose", action="store_true",
+                    help="log per-row decisions, not just per-site outcomes")
     ap.add_argument("--dry-run", action="store_true",
                     help="report the planned work and exit")
     ap.add_argument("--confident", type=float, default=None)
@@ -230,33 +258,66 @@ def main(argv: list[str] | None = None) -> int:
     if args.min_margin is not None:
         th.min_margin = args.min_margin
 
+    run_id = new_run_id()
+    log_path = setup_logging(run_id, args.log_dir, verbose=args.verbose,
+                             quiet=args.dry_run)
+    log = logging.getLogger("run")
+
     rows = load_rows(args.input)
-    by_inst = group_by_institution(rows)
-    ranked = sorted(by_inst.items(), key=lambda kv: -len(kv[1]))
+    by_site = group_by_site(rows)
+    # Rows with no usable website cannot be crawled at all; they are reported
+    # rather than silently dropped.
+    no_site = by_site.pop("", [])
+    # Rank by rows that are plausibly courses, not raw row count. The largest
+    # bucket in the sheet is 5,083 ANZSCO visa occupation codes on a government
+    # site, which no crawl can resolve; ranking on it would spend the first
+    # --limit slot on guaranteed waste. Nothing is skipped — a full run still
+    # covers every bucket.
+    NON_COURSE = {"occupation_code_not_course", "year_level_not_course"}
+
+    def course_rows(rs):
+        """Rows in a bucket that are plausibly courses at all."""
+        return sum(1 for r in rs if not (NON_COURSE & set(r.flags)))
+
+    ranked = sorted(by_site.items(),
+                    key=lambda kv: (-course_rows(kv[1]), -len(kv[1]), kv[0]))
 
     if args.institution:
+        # Match on Institution name for convenience, but still process whole
+        # site buckets, since that is what a Catalog covers.
         wanted = {w.lower() for w in args.institution}
-        ranked = [(k, v) for k, v in ranked if k.lower() in wanted]
+        ranked = [(k, v) for k, v in ranked
+                  if any(r.institution_name.lower() in wanted for r in v)]
         if not ranked:
             print(f"No Institution matched {args.institution!r}. Try one of:",
                   file=sys.stderr)
-            for k, v in sorted(by_inst.items(), key=lambda kv: -len(kv[1]))[:10]:
-                print(f"  {len(v):5d}  {k}", file=sys.stderr)
+            for k, v in sorted(by_site.items(), key=lambda kv: -len(kv[1]))[:10]:
+                print(f"  {len(v):5d}  {site_display_name(v)}", file=sys.stderr)
             return 2
     if args.limit:
         ranked = ranked[:args.limit]
 
     planned_rows = sum(len(v) for _, v in ranked)
-    print(f"{len(ranked)} institutions, {planned_rows} course rows "
-          f"({len(dedupe([r for _, v in ranked for r in v]))} unique work items)")
+    print(f"{len(ranked)} sites, {planned_rows} course rows "
+          f"({len(dedupe([r for _, v in ranked for r in v]))} unique work items)"
+          + (f"; {len(no_site)} rows have no usable website" if no_site else ""))
     if args.dry_run:
-        for inst, rs in ranked[:40]:
+        for site_key, rs in ranked[:40]:
             site = normalise_website(rs[0].website) or "(no usable website)"
-            cached = "cached" if os.path.exists(catalog_path(inst)) else "-"
-            print(f"  {len(rs):5d}  {inst[:46]:48s} {site[:44]:46s} {cached}")
+            cached = "cached" if os.path.exists(catalog_path(site_key)) else "-"
+            label = site_display_name(rs)
+            print(f"  {len(rs):5d}  {label[:40]:42s} {site[:40]:42s} {cached}")
         if len(ranked) > 40:
             print(f"  ... and {len(ranked) - 40} more")
         return 0
+
+    store = Store(args.db) if args.db else None
+    if store:
+        store.start_run(run_id, args.input, vars(args))
+    log.info(f"run {run_id}: {len(ranked)} sites, {planned_rows} rows",
+             extra={"run_id": run_id, "sites": len(ranked),
+                    "rows": planned_rows, "log_file": log_path,
+                    "db": args.db or None})
 
     fetcher = Fetcher(delay=args.delay, offline=args.offline)
     results: list[MatchResult] = []
@@ -265,8 +326,8 @@ def main(argv: list[str] | None = None) -> int:
     done = 0
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(process_institution, fetcher, inst, rs, th, args):
-                   inst for inst, rs in ranked}
+        futures = {pool.submit(process_site, fetcher, sk, rs, th, args):
+                   sk for sk, rs in ranked}
         for fut in concurrent.futures.as_completed(futures):
             inst = futures[fut]
             done += 1
@@ -279,17 +340,30 @@ def main(argv: list[str] | None = None) -> int:
             results.extend(res)
             health[inst] = h
             filled = sum(1 for r in res if r.url)
-            print(f"  [{done}/{len(ranked)}] {inst[:44]:46s} "
-                  f"cand={h['candidates']:5d} {h['strategy']:16s} "
-                  f"{'ok ' if h['healthy'] else 'NO '} filled={filled}/{len(res)}")
+            label = site_display_name([r.row for r in res]) if res else inst
+            log.info(
+                f"  [{done}/{len(ranked)}] {label[:42]:44s} "
+                f"cand={h['candidates']:5d} {h['strategy']:16s} "
+                f"{'ok ' if h['healthy'] else 'NO '} filled={filled}/{len(res)}",
+                extra={"run_id": run_id, "site_key": inst,
+                       "institution": label,
+                       "candidates": h.get("candidates"),
+                       "strategy": h.get("strategy"),
+                       "healthy": bool(h.get("healthy")),
+                       "diagnosis": h.get("diagnosis"),
+                       "rows": len(res), "filled": filled})
+            if store:
+                website = next((normalise_website(r.row.website) for r in res
+                                if normalise_website(r.row.website)), "")
+                store.record_site(run_id, inst, label, website, h)
 
     if not args.no_verify:
         targets = [r for r in results
                    if r.url and "shared_with_duplicate_row" not in r.flags]
         targets = interleave_by_domain(targets)
-        print(f"verifying {len(targets)} assigned URLs "
-              f"across {len({registrable(urllib.parse.urlsplit(r.url).netloc) for r in targets})} domains...",
-              flush=True)
+        log.info(f"verifying {len(targets)} assigned URLs "
+                 f"across {len({registrable(urllib.parse.urlsplit(r.url).netloc) for r in targets})} domains",
+                 extra={"run_id": run_id, "targets": len(targets)})
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
             list(pool.map(lambda r: verify(fetcher, r, th), targets))
         # Propagate the verified status onto duplicate rows.
@@ -302,22 +376,46 @@ def main(argv: list[str] | None = None) -> int:
                     r.live_score = src.live_score
 
     results.sort(key=lambda r: (r.row.institution_name, r.row.name, r.row.id))
+
+    drifted = 0
+    if store:
+        drifted = store.record_results(run_id, results)
+        store.finish_run(run_id, len(results),
+                         sum(1 for r in results if r.url))
+
     write_filled_csv(results, args.out)
     n_review = write_review_queue(results, args.review_out)
     n_cal = write_calibration_sample(results, args.calibration_out)
     write_coverage_report(results, health, args.report_out, fetcher.stats)
 
     filled = sum(1 for r in results if r.url)
-    print()
-    print(f"wrote {args.out} ({len(results)} rows, {filled} filled "
-          f"= {100 * filled / max(1, len(results)):.1f}%)")
-    print(f"wrote {args.review_out} ({n_review} rows needing review)")
-    print(f"wrote {args.calibration_out} ({n_cal} rows to label)")
-    print(f"wrote {args.report_out}")
-    print(f"fetch: {fetcher.stats.requests} requests, "
-          f"{fetcher.stats.cache_hits} cache hits, {fetcher.stats.errors} errors, "
-          f"{fetcher.stats.blocked_by_robots} robots-blocked")
-    print(f"elapsed {time.time() - started:.0f}s")
+    shared = sum(1 for r in results
+                 if any(f.startswith("variant_sibling_share") for f in r.flags))
+    denied = sum(1 for r in results
+                 if any(f.startswith("share_denied") for f in r.flags))
+    log.info("")
+    log.info(f"wrote {args.out} ({len(results)} rows, {filled} filled "
+             f"= {100 * filled / max(1, len(results)):.1f}%)")
+    log.info(f"wrote {args.review_out} ({n_review} rows needing review)")
+    log.info(f"wrote {args.calibration_out} ({n_cal} rows to label)")
+    log.info(f"wrote {args.report_out}")
+    log.info(f"sharing: {shared} rows in a Share Group, "
+             f"{denied} denied a non-sibling's URL")
+    if store:
+        log.info(f"store: {args.db} (run {run_id}; {drifted} URLs changed "
+                 f"since the previous run)")
+    log.info(f"logs: {log_path}")
+    log.info(f"fetch: {fetcher.stats.requests} requests, "
+             f"{fetcher.stats.cache_hits} cache hits, "
+             f"{fetcher.stats.errors} errors, "
+             f"{fetcher.stats.blocked_by_robots} robots-blocked")
+    log.info(f"elapsed {time.time() - started:.0f}s",
+             extra={"run_id": run_id, "rows": len(results), "filled": filled,
+                    "shared": shared, "share_denied": denied,
+                    "drifted": drifted,
+                    "elapsed_s": round(time.time() - started, 1)})
+    if store:
+        store.close()
     return 0
 
 

@@ -1,8 +1,23 @@
-"""Scoring Course Rows against a Catalog, and Assignment under uniqueness.
+"""Scoring Course Rows against a Catalog, and Assignment under bounded sharing.
 
-Assignment is per-Institution and enforces that each URL is claimed by at most
-one Course Row — see ADR-0002 for why independent per-row matching is unsafe on
-this data, and `docs/SCORING.md` for the decision tree and worked arithmetic.
+Assignment is per-Institution. A URL may be held by several Course Rows, but
+only when they are **Variant Siblings** — the same course delivered differently,
+such as `Anthropology` and `Anthropology with Placement` — and only up to
+`SHARE_CAP`. See ADR-0004, which supersedes the strict-uniqueness rail of
+ADR-0002, and `docs/SCORING.md` for the decision tree and worked arithmetic.
+
+Why sharing needs a stem test rather than a threshold
+-----------------------------------------------------
+Score cannot make this distinction. Measured on real names, `Anthropology BA`
+scores **0.775** against both `Anthropology with Placement BA` (a sibling,
+which should share) and `Archaeology and Anthropology BA` (a different course,
+which must not). Identical scores, opposite correct answers, so no floor or
+margin separates them — `normalize.variant_stem()` does.
+
+Sharing is *not* what protects against catastrophic collapse; the floor, the
+Award/Level guard and subject-only comparison do. Against the 116-course
+collapse found in the source data, this scorer rates the victims 0.130-0.141
+against a floor of 0.55.
 
 Where the final Score comes from
 --------------------------------
@@ -18,14 +33,16 @@ What `assign()` does, in order
 2. Flatten to `(score, row, candidate)` triples.
 3. Sort by descending score, ties broken by row then candidate id, so a rerun
    produces a byte-identical CSV.
-4. Walk the triples greedily, claiming a pair only when the row is unclaimed,
-   the URL is unclaimed and the score clears the floor. **This loop is the
-   uniqueness rail of ADR-0002** — it is what stops two variant rows taking the
-   same URL, and it is why a row can be starved of a URL it scored 1.000
-   against.
+4. Walk the triples greedily, claiming a pair when the row is unclaimed, the
+   score clears the floor, and the URL is either unheld or held only by Variant
+   Siblings within `SHARE_CAP`. **This loop is the sharing rail of ADR-0004.**
+   A refusal is recorded with the URL wanted and the row holding it, so a blank
+   cell is always explainable.
 5. Build one result per row, computing Margin (see below).
 6. Apply demotions.
-7. Run the post-checks: `_assert_unique_urls`, then `_drop_offsite_urls`.
+7. Run the post-checks in order: `_drop_offsite_urls`, `_flag_share_groups`,
+   then `_assert_shares_are_justified`. Off-site drops come first so a removed
+   row cannot make a valid Share Group look malformed.
 
 Two things are easy to break here
 ---------------------------------
@@ -48,9 +65,10 @@ assigned anything:
 
 Greedy, not optimal
 -------------------
-Descending-score greedy rather than optimal bipartite matching. Uniqueness —
-the property that matters — holds under either, and greedy is explainable in
-the Review Queue: "a stronger row took it" is a sentence a reviewer can act on.
+Descending-score greedy rather than optimal bipartite matching. The property
+that matters — that a Share Group is one course in several variants — holds
+under either, and greedy is explainable in the Review Queue: "a stronger row
+took it, and it is not your variant" is a sentence a reviewer can act on.
 """
 
 from __future__ import annotations
@@ -63,13 +81,21 @@ import urllib.parse
 from pipeline.catalog import Candidate, Catalog, url_specificity
 from pipeline.fetch import registrable
 from pipeline.load import CourseRow
-from pipeline.normalize import normalize_name, score as score_pair
+from pipeline.normalize import (are_variant_siblings, normalize_name,
+                                score as score_pair, variant_stem)
 
 # Fitted against the observed Margins; see docs/CALIBRATION.md.
 CONFIDENT = 0.80        # at or above this (with Margin) a match may auto-fill
 FLOOR = 0.55            # below this nothing is filled at all
 MIN_MARGIN = 0.10       # a Margin thinner than this is Ambiguous
 PREFILTER_MIN = 0.30    # below this a pair is not worth ranking
+
+# How many Course Rows may share one URL. Legitimate Share Groups in the data
+# are almost all 2-3 (a course plus its Honours or Placement variant); the
+# pathological collapse in the source sheet ran to 116 courses on a single
+# page. The cap is a backstop behind the Variant Sibling test, not the primary
+# guard.
+SHARE_CAP = 8
 
 
 @dataclass
@@ -200,11 +226,18 @@ def score_all(rows: list[CourseRow], catalog: Catalog,
 
 def assign(rows: list[CourseRow], catalog: Catalog, institution: str = "",
            thresholds: Thresholds | None = None) -> list[MatchResult]:
-    """Assign at most one Candidate per Course Row, each URL used at most once.
+    """Assign at most one Candidate per Course Row, with bounded URL sharing.
 
-    The uniqueness constraint is what makes this different from matching each
-    row independently, and it is load-bearing: see ADR-0002. The module
-    docstring lists the seven steps and the two things that are easy to break.
+    A URL may be held by several Course Rows, but only when they are Variant
+    Siblings — the same course delivered differently — and only up to
+    SHARE_CAP. This is what makes Assignment different from matching each row
+    independently, and it is load-bearing: see ADR-0004, which supersedes the
+    strict-uniqueness rail of ADR-0002.
+
+    The guarantee the sharing rule buys is interpretive: **a shared URL always
+    means one course in several variants.** A row whose best URL is held by a
+    non-sibling is left blank with the denial recorded, rather than being given
+    a URL that would make Share Groups meaningless.
     """
     th = thresholds or Thresholds()
     cands = catalog.candidates
@@ -218,15 +251,28 @@ def assign(rows: list[CourseRow], catalog: Catalog, institution: str = "",
             triples.append((s, rid, ci))
     triples.sort(key=lambda t: (-t[0], t[1], t[2]))
 
+    by_id = {r.id: r for r in rows}
     claimed_rows: dict[str, int] = {}
-    claimed_urls: set[str] = set()
+    claimed_urls: dict[str, list[str]] = {}          # url -> holding row ids
+    # Highest-scoring refusal per row, so the reviewer sees the URL the row
+    # most wanted rather than an arbitrary later one.
+    share_denied: dict[str, tuple[str, str, str]] = {}
+
     for s, rid, ci in triples:
-        if rid in claimed_rows or cands[ci].url in claimed_urls:
+        if rid in claimed_rows or s < th.floor:
             continue
-        if s < th.floor:
-            continue
+        url = cands[ci].url
+        holders = claimed_urls.get(url)
+        if holders:
+            if len(holders) >= SHARE_CAP:
+                share_denied.setdefault(rid, (url, holders[0], "cap_reached"))
+                continue
+            if not all(are_variant_siblings(by_id[rid].name, by_id[h].name)
+                       for h in holders):
+                share_denied.setdefault(rid, (url, holders[0], "stem_mismatch"))
+                continue
         claimed_rows[rid] = ci
-        claimed_urls.add(cands[ci].url)
+        claimed_urls.setdefault(url, []).append(rid)
 
     results: list[MatchResult] = []
     for row in rows:
@@ -242,14 +288,25 @@ def assign(rows: list[CourseRow], catalog: Catalog, institution: str = "",
             if pairs:
                 res.margin = pairs[0][0] - (pairs[1][0] if len(pairs) > 1
                                             else 0.0)
-            if pairs and pairs[0][0] >= th.floor:
-                # Its best Candidate went to a stronger claim.
-                res.status = "no_match"
+            res.status = "no_match"
+            if row.id in share_denied:
+                # Refused a URL a non-sibling holds. Recording which URL and
+                # who holds it is what makes this reviewable in one glance
+                # instead of an unexplained empty cell.
+                denied_url, holder, reason = share_denied[row.id]
+                res.flags.append(f"share_denied_{reason}")
+                res.flags.append(f"denied_url={denied_url}")
+                res.flags.append(f"denied_held_by={holder}")
+                res.runner_up = next((cands[i] for _s, i in pairs
+                                      if cands[i].url == denied_url), None)
+                res.runner_up_score = next((_s for _s, i in pairs
+                                            if cands[i].url == denied_url), 0.0)
+            elif pairs and pairs[0][0] >= th.floor:
+                # Defensive: every refusal above records a reason, so reaching
+                # here means the row was outranked for its own Candidate.
                 res.flags.append("url_claimed_by_stronger_match")
                 res.runner_up = cands[pairs[0][1]]
                 res.runner_up_score = pairs[0][0]
-            else:
-                res.status = "no_match"
             results.append(res)
             continue
 
@@ -285,6 +342,14 @@ def assign(rows: list[CourseRow], catalog: Catalog, institution: str = "",
             res.flags.append("hub_page_match")
             if res.status == "confident":
                 res.status = "probable"
+        if res.candidate.source == "prior":
+            # The name came from the page this URL points at, and Verification
+            # re-reads that same page — so agreement is circular, not
+            # corroboration. Only a URL also found in a listing can be
+            # `verified`.
+            res.flags.append("name_from_page")
+            if res.status == "confident":
+                res.status = "probable"
         if res.candidate.source == "sitemap":
             # A sitemap-derived name comes from a URL slug, not from text the
             # Site printed next to the course, so it is weaker evidence.
@@ -293,9 +358,24 @@ def assign(rows: list[CourseRow], catalog: Catalog, institution: str = "",
                 res.status = "probable"
         results.append(res)
 
-    _assert_unique_urls(results)
+    # Off-site URLs are dropped before the Share Group check, so a dropped row
+    # cannot make an otherwise-valid group look malformed.
     _drop_offsite_urls(results, catalog)
+    _flag_share_groups(results)
+    _assert_shares_are_justified(results)
     return results
+
+
+def _flag_share_groups(results: list[MatchResult]) -> None:
+    """Mark every row that shares its URL, so Share Groups are visible."""
+    holders: dict[str, list[MatchResult]] = {}
+    for r in results:
+        if r.url:
+            holders.setdefault(r.url, []).append(r)
+    for url, group in holders.items():
+        if len(group) > 1:
+            for r in group:
+                r.flags.append(f"variant_sibling_share={len(group)}")
 
 
 def _drop_offsite_urls(results: list[MatchResult], catalog: Catalog) -> None:
@@ -320,15 +400,30 @@ def _drop_offsite_urls(results: list[MatchResult], catalog: Catalog) -> None:
             r.status = "no_match"
 
 
-def _assert_unique_urls(results: list[MatchResult]) -> None:
-    """The ADR-0002 rail. A violation is a bug, not a data condition."""
-    seen: dict[str, str] = {}
+def _assert_shares_are_justified(results: list[MatchResult]) -> None:
+    """The ADR-0004 rail: every Share Group is one course in several variants.
+
+    Sharing itself is legal now, so this no longer raises on a repeated URL.
+    It raises when a group's members are *not* Variant Siblings, or when a
+    group exceeds SHARE_CAP — either of which means the claim loop let
+    something through, i.e. a bug rather than a data condition.
+    """
+    holders: dict[str, list[MatchResult]] = {}
     for r in results:
-        if not r.url:
+        if r.url:
+            holders.setdefault(r.url, []).append(r)
+
+    for url, group in holders.items():
+        if len(group) == 1:
             continue
-        if r.url in seen:
-            r.flags.append("duplicate_url_collision")
+        if len(group) > SHARE_CAP:
             raise AssertionError(
-                f"URL assigned twice within {r.row.institution_name!r}: "
-                f"{r.url} claimed by rows {seen[r.url]} and {r.row.id}")
-        seen[r.url] = r.row.id
+                f"Share Group over cap in {group[0].row.institution_name!r}: "
+                f"{url} held by {len(group)} rows (cap {SHARE_CAP})")
+        stems = {variant_stem(r.row.name) for r in group}
+        if len(stems) > 1:
+            names = ", ".join(repr(r.row.name) for r in group[:4])
+            raise AssertionError(
+                f"Share Group with mismatched Variant Stems in "
+                f"{group[0].row.institution_name!r}: {url} held by {names} "
+                f"-> stems {sorted(stems)}")

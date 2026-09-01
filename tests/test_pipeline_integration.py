@@ -9,7 +9,7 @@ from pipeline.catalog import Candidate, Catalog
 from pipeline.fetch import FetchResult, registrable
 from pipeline.load import CourseRow
 from pipeline.match import MatchResult, Thresholds
-from run import catalog_path, clone_for, process_institution, slugify, verify
+from run import catalog_path, clone_for, process_site, slugify, verify
 
 ABER = "Aberystwyth University"
 DS = "https://courses.aber.ac.uk/undergraduate/data-science/"
@@ -59,7 +59,7 @@ class TestCatalogSchemaVersioning(unittest.TestCase):
                  "candidates": [{"name": "Data Science", "url": DS}]}
         built = {"called": False}
 
-        def fake_build(fetcher, institution, website, expected_rows):
+        def fake_build(fetcher, institution, website, expected_rows, **kw):
             built["called"] = True
             return Catalog(institution, [Candidate("Data Science", DS, "ug")],
                            strategy="listing", domains=["aber.ac.uk"])
@@ -100,7 +100,7 @@ class TestCatalogSchemaVersioning(unittest.TestCase):
                               "level": "ug", "source": "listing"}]}
         built = {"called": False}
 
-        def fake_build(fetcher, institution, website, expected_rows):
+        def fake_build(fetcher, institution, website, expected_rows, **kw):
             built["called"] = True
             return Catalog(institution, [Candidate("Data Science", DS, "ug")],
                            strategy="listing", domains=["aber.ac.uk"],
@@ -176,7 +176,7 @@ class TestFailClosed(unittest.TestCase):
         original = run_mod.load_or_build_catalog
         run_mod.load_or_build_catalog = fake_loader
         try:
-            res, health = process_institution(
+            res, health = process_site(
                 StubFetcher({}), "Abertay University", rows,
                 Thresholds(), args())
         finally:
