@@ -2,7 +2,55 @@
 
 Assignment is per-Institution and enforces that each URL is claimed by at most
 one Course Row — see ADR-0002 for why independent per-row matching is unsafe on
-this data.
+this data, and `docs/SCORING.md` for the decision tree and worked arithmetic.
+
+Where the final Score comes from
+--------------------------------
+`normalize.score()` measures name similarity but knows nothing about URLs.
+`score_all()` here multiplies its result by `catalog.url_specificity()`, so the
+number this module works with is **not** the number that module returned: a
+`score()` of 1.000 against a subject hub page becomes 0.820. That composition
+is easy to miss because it spans two modules.
+
+What `assign()` does, in order
+------------------------------
+1. Score every Course Row against Candidates sharing at least one token.
+2. Flatten to `(score, row, candidate)` triples.
+3. Sort by descending score, ties broken by row then candidate id, so a rerun
+   produces a byte-identical CSV.
+4. Walk the triples greedily, claiming a pair only when the row is unclaimed,
+   the URL is unclaimed and the score clears the floor. **This loop is the
+   uniqueness rail of ADR-0002** — it is what stops two variant rows taking the
+   same URL, and it is why a row can be starved of a URL it scored 1.000
+   against.
+5. Build one result per row, computing Margin (see below).
+6. Apply demotions.
+7. Run the post-checks: `_assert_unique_urls`, then `_drop_offsite_urls`.
+
+Two things are easy to break here
+---------------------------------
+**Status is not decided by the visible if/elif chain alone.** That chain picks
+confident / ambiguous / probable from score and Margin, and then two demotions
+may knock a `confident` result down to `probable`: a hub-page URL, and a name
+derived from a sitemap slug rather than anchor text. Both are claims about
+*evidence quality* rather than about similarity, which is why they are applied
+afterwards instead of folded into the Score.
+
+**Margin means two different things**, depending on whether the row was
+assigned anything:
+
+  - assigned      -> assigned Score minus the best *rejected* Candidate's.
+                     Negative when the row was displaced onto a second choice.
+  - not assigned  -> the row's own top-1 minus top-2, which is retained only as
+                     a debugging aid. It is never written to the CSV, because
+                     `write_filled_csv` blanks Margin whenever there is no
+                     Candidate.
+
+Greedy, not optimal
+-------------------
+Descending-score greedy rather than optimal bipartite matching. Uniqueness —
+the property that matters — holds under either, and greedy is explainable in
+the Review Queue: "a stronger row took it" is a sentence a reviewer can act on.
 """
 
 from __future__ import annotations
@@ -152,11 +200,15 @@ def score_all(rows: list[CourseRow], catalog: Catalog,
 
 def assign(rows: list[CourseRow], catalog: Catalog, institution: str = "",
            thresholds: Thresholds | None = None) -> list[MatchResult]:
-    """Assign at most one Candidate per Course Row, each URL used at most once."""
+    """Assign at most one Candidate per Course Row, each URL used at most once.
+
+    The uniqueness constraint is what makes this different from matching each
+    row independently, and it is load-bearing: see ADR-0002. The module
+    docstring lists the seven steps and the two things that are easy to break.
+    """
     th = thresholds or Thresholds()
     cands = catalog.candidates
     scored = score_all(rows, catalog, institution)
-    by_id = {r.id: r for r in rows}
 
     # Every (score, row, candidate) triple, best first. Ties broken
     # deterministically so a rerun produces an identical CSV.
@@ -180,14 +232,16 @@ def assign(rows: list[CourseRow], catalog: Catalog, institution: str = "",
     for row in rows:
         pairs = scored.get(row.id, [])
         res = MatchResult(row=row)
-
-        # Margin is a property of the row's own ranking over the whole Catalog,
-        # independent of what other rows claimed.
-        if pairs:
-            res.margin = pairs[0][0] - (pairs[1][0] if len(pairs) > 1 else 0.0)
-
         ci = claimed_rows.get(row.id)
+
         if ci is None:
+            # Nothing assigned. Margin here is the row's own top-1 minus top-2,
+            # a different quantity from the assigned case below, and it is kept
+            # only as a debugging aid: write_filled_csv blanks Margin whenever
+            # there is no Candidate, so this value never reaches the output.
+            if pairs:
+                res.margin = pairs[0][0] - (pairs[1][0] if len(pairs) > 1
+                                            else 0.0)
             if pairs and pairs[0][0] >= th.floor:
                 # Its best Candidate went to a stronger claim.
                 res.status = "no_match"
@@ -206,6 +260,9 @@ def assign(rows: list[CourseRow], catalog: Catalog, institution: str = "",
             if i != ci:
                 res.runner_up, res.runner_up_score = cands[i], s
                 break
+        # Margin for an assigned row: how far ahead of the best rejected
+        # Candidate. Goes negative when a stronger row claimed this one's first
+        # choice and it fell back to a second.
         res.margin = res.score - res.runner_up_score
 
         if res.margin < 0:

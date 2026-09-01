@@ -448,15 +448,34 @@ _LEVEL_PATH = re.compile(
     r"|programme|programmes|degree|degrees)/[^/]+", re.IGNORECASE)
 
 
+# How much a Candidate's Score is discounted for the *shape* of its URL. These
+# are Scoring weights and belong with the others in `pipeline/normalize.py`
+# conceptually, but they live here because only this module knows what a URL
+# path means. Applied in `pipeline/match.py`, not inside `normalize.score()`.
+#
+# A subject hub carries exactly the subject's name, so it ties with the real
+# course page on text alone and wins on nothing; demotion is what breaks that
+# tie. Demotion rather than exclusion, because some Institutions genuinely
+# list courses under these paths.
+HUB_PAGE_SPECIFICITY = 0.82
+SHALLOW_PATH_SPECIFICITY = 0.90
+
+
 def url_specificity(url: str) -> float:
-    """Multiplier reflecting how course-page-like a Candidate's URL is."""
+    """Multiplier reflecting how course-page-like a Candidate's URL is.
+
+    1.0 for a leaf under a level path ("/undergraduate/<slug>"), less for a hub
+    or a suspiciously shallow path. Applied by `score_all` in
+    `pipeline/match.py` *after* `normalize.score()` has returned, so the number
+    that module produces is not the final one.
+    """
     path = urllib.parse.urlsplit(url).path
     if _LEVEL_PATH.search(path):
         return 1.0
     if _HUB_PATH.search(path):
-        return 0.82
+        return HUB_PAGE_SPECIFICITY
     depth = len([s for s in path.split("/") if s])
-    return 1.0 if depth >= 2 else 0.90
+    return 1.0 if depth >= 2 else SHALLOW_PATH_SPECIFICITY
 
 
 def looks_like_course_name(text: str) -> bool:

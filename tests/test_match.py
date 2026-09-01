@@ -4,7 +4,7 @@ import unittest
 
 from pipeline.catalog import Candidate, Catalog
 from pipeline.load import CourseRow
-from pipeline.match import Thresholds, assign
+from pipeline.match import Thresholds, assign, score_all
 
 ABER = "Aberystwyth University"
 SITE = "https://www.aber.ac.uk"
@@ -169,6 +169,57 @@ class TestDomainContainment(unittest.TestCase):
                       strategy="listing")
         res = assign([row("1", "Data Science BSc (Hons)")], cat, ABER)
         self.assertEqual(res[0].url, DS)
+
+
+class TestScoreComposition(unittest.TestCase):
+    """The Score this module uses is not the one normalize.score() returned.
+
+    `score_all` multiplies by `url_specificity`, a composition that spans two
+    modules and is easy to miss when reading either one alone.
+    """
+
+    def test_hub_page_scores_below_its_name_similarity(self):
+        from pipeline.catalog import url_specificity
+        from pipeline.normalize import score as name_score
+
+        cand = Candidate("Data Science", HUB, None)
+        cat = catalog(cand)
+        scored = score_all([row("1", "Data Science BSc (Hons)")], cat, ABER)
+        composed = scored["1"][0][0]
+        by_name = name_score("Data Science BSc (Hons)", cand.name, ABER,
+                             candidate_level=cand.level)
+
+        self.assertLess(composed, by_name)
+        self.assertAlmostEqual(composed, round(by_name * url_specificity(HUB), 4),
+                               places=4)
+
+    def test_course_page_is_not_discounted(self):
+        from pipeline.normalize import score as name_score
+
+        cand = Candidate("Data Science (BSc, 3 years)", DS, "ug")
+        scored = score_all([row("1", "Data Science BSc (Hons)")],
+                           catalog(cand), ABER)
+        self.assertAlmostEqual(
+            scored["1"][0][0],
+            name_score("Data Science BSc (Hons)", cand.name, ABER,
+                       candidate_level="ug"), places=4)
+
+
+class TestDemotionPrecedence(unittest.TestCase):
+    """Demotions run *after* the confident/ambiguous/probable chain."""
+
+    def test_a_result_that_qualifies_on_score_and_margin_is_still_demoted(self):
+        th = Thresholds()
+        cat = catalog(Candidate("Data Science", HUB, None),
+                      Candidate("Basket Weaving", DS_IY, "ug"))
+        res = assign([row("1", "Data Science BSc (Hons)")], cat, ABER)[0]
+
+        # It clears both bars the visible chain tests...
+        self.assertGreaterEqual(res.score, th.confident)
+        self.assertGreaterEqual(res.margin, th.min_margin)
+        # ...and is still not confident, because the URL is a hub page.
+        self.assertEqual(res.status, "probable")
+        self.assertIn("hub_page_match", res.flags)
 
 
 class TestDeterminism(unittest.TestCase):

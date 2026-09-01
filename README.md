@@ -9,6 +9,15 @@ that shape the architecture are recorded in [docs/adr/](./docs/adr/) — read
 ADR-0001 first if you are wondering why this crawls instead of building URLs
 from patterns.
 
+| to understand | read |
+|---|---|
+| what the words mean | [CONTEXT.md](./CONTEXT.md) |
+| why it is built this way | [docs/adr/](./docs/adr/) |
+| how a Score is computed and how Assignment decides | [docs/SCORING.md](./docs/SCORING.md) |
+| what happens to one row, stage by stage | [docs/WALKTHROUGH.md](./docs/WALKTHROUGH.md) |
+| how to fit the thresholds | [docs/CALIBRATION.md](./docs/CALIBRATION.md) |
+| how the crawler finds listings | the `pipeline/catalog.py` module docstring |
+
 ## Guarantees
 
 - **`processed_courses.csv` is never written to.** It is input only.
