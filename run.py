@@ -33,6 +33,50 @@ from pipeline.report import (write_calibration_sample, write_coverage_report,
 CATALOG_DIR = "catalogs"
 
 
+CHUNK_RE = re.compile(r"\.(\d{3})\.csv$")
+
+
+def chunk_suffix(input_path: str) -> str:
+    """`.003` when reading `chunks/final_courses.003.csv`, else "".
+
+    Chunked runs must not overwrite each other's outputs, and deriving the
+    suffix from the input name means the caller does not have to remember to
+    pass four `--*-out` paths per chunk.
+    """
+    m = CHUNK_RE.search(os.path.basename(input_path or ""))
+    return f".{m.group(1)}" if m else ""
+
+
+def check_chunk_freshness(input_path: str) -> None:
+    """Warn when a chunk no longer matches the sheet it was cut from.
+
+    This is the cost of physical chunk files: nothing stops `final_courses.csv`
+    being replaced while stale chunks sit on disk. The manifest records the
+    source checksum so the divergence is at least loud.
+    """
+    manifest = os.path.join(os.path.dirname(input_path), "manifest.json")
+    if not os.path.exists(manifest):
+        return
+    try:
+        with open(manifest, encoding="utf-8") as fh:
+            data = json.load(fh)
+        source = data.get("source")
+        recorded = data.get("source_sha256")
+        if not source or not recorded or not os.path.exists(source):
+            return
+        import hashlib
+        h = hashlib.sha256()
+        with open(source, "rb") as fh:
+            for block in iter(lambda: fh.read(1 << 20), b""):
+                h.update(block)
+        if h.hexdigest() != recorded:
+            print(f"WARNING: {input_path} was cut from a different version of "
+                  f"{source}. Re-run tools/split_by_site.py before trusting "
+                  f"these results.", file=sys.stderr)
+    except (OSError, ValueError):
+        return
+
+
 def slugify(name: str) -> str:
     """Institution name to a filesystem-safe stem for its cached Catalog.
 
@@ -235,10 +279,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--input", default=DEFAULT_INPUT,
                     help="course sheet to read; the legacy "
                          "processed_courses.csv is still accepted")
-    ap.add_argument("--out", default="courses_filled.csv")
-    ap.add_argument("--review-out", default="review_queue.csv")
-    ap.add_argument("--report-out", default="coverage_report.md")
-    ap.add_argument("--calibration-out", default="calibration_sample.csv")
+    # Left as None so a chunked run can suffix the defaults without
+    # overriding a path the caller set explicitly.
+    ap.add_argument("--out", default=None)
+    ap.add_argument("--review-out", default=None)
+    ap.add_argument("--report-out", default=None)
+    ap.add_argument("--calibration-out", default=None)
     ap.add_argument("--institution", action="append", default=None,
                     help="restrict to one Institution (repeatable)")
     ap.add_argument("--limit", type=int, default=None,
@@ -275,6 +321,15 @@ def main(argv: list[str] | None = None) -> int:
         th.floor = args.floor
     if args.min_margin is not None:
         th.min_margin = args.min_margin
+
+    chunk_tag = chunk_suffix(args.input)
+    if chunk_tag:
+        check_chunk_freshness(args.input)
+    args.out = args.out or f"courses_filled{chunk_tag}.csv"
+    args.review_out = args.review_out or f"review_queue{chunk_tag}.csv"
+    args.report_out = args.report_out or f"coverage_report{chunk_tag}.md"
+    args.calibration_out = (args.calibration_out
+                            or f"calibration_sample{chunk_tag}.csv")
 
     run_id = new_run_id()
     log_path = setup_logging(run_id, args.log_dir, verbose=args.verbose,
@@ -379,6 +434,12 @@ def main(argv: list[str] | None = None) -> int:
                 website = next((normalise_website(r.row.website) for r in res
                                 if normalise_website(r.row.website)), "")
                 store.record_site(run_id, inst, label, website, h)
+                # Persist this site's rows now rather than at end of run, so a
+                # killed run keeps what it finished. Both existing runs in the
+                # store were killed and hold zero results because the only
+                # write was the end-of-run one. Re-written after Verification
+                # below, which is why URL history is not touched here.
+                store.record_row_results(run_id, res)
 
     if not args.no_verify:
         targets = [r for r in results

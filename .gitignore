@@ -20,6 +20,15 @@ logs/
 # the repo root untracked and unignored.
 *.log
 
+# Chunk files and their per-chunk outputs. Regenerable from the sheet with
+# tools/split_by_site.py; tracking them would guarantee they go stale.
+chunks/
+catalogs.baseline/
+courses_filled.*.csv
+review_queue.*.csv
+coverage_report.*.md
+calibration_sample.*.csv
+
 # Pipeline outputs. The input CSV is the only data this repo tracks.
 courses_filled.csv
 review_queue.csv

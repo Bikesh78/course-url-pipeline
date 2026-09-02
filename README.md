@@ -37,6 +37,9 @@ from patterns.
   `bs4`/`lxml` (ADR-0003).
 - **Every stage is resumable.** All HTTP responses are cached under `.cache/`,
   and extracted Catalogs under `catalogs/`. An interrupted run resumes free.
+- **Results survive a kill.** Each Site's rows are written to `pipeline.db` as
+  it completes, not at the end of the run, so an interrupted run keeps what it
+  finished.
 - **Every run is traceable.** A `run_id` stamps a JSONL log in `logs/` and every
   row of `pipeline.db`, which also keeps each Course Row's URL history
   (ADR-0005).
@@ -148,6 +151,60 @@ re-reads what it already fetched and only issues requests for what it has not
 seen. Re-running the Aberystwyth harness after a completed run takes **5
 seconds** and 2 network requests. Delete `.cache/` to force a refetch, or pass
 `--refresh-catalogs` to re-extract Catalogs while keeping the page cache.
+
+## Running in chunks
+
+A full run over `final_courses.csv` takes several hours. Chunking does **not**
+make that total smaller — it delivers a complete vertical slice (Phase 1 →
+Phase 2 → accuracy) on part of the sheet early, so problems surface before
+Phase 2 spends money on all 52,781 rows.
+
+```bash
+python tools/split_by_site.py --chunks 20 --report   # plan only, no files
+python tools/split_by_site.py --chunks 20            # writes chunks/
+
+python run.py --input chunks/final_courses.001.csv   # one chunk
+python run.py --input chunks/final_courses.002.csv
+#   ...
+python tools/merge_chunks.py                         # combine the results
+```
+
+Output paths are suffixed automatically from the chunk number
+(`courses_filled.001.csv`), so chunks cannot overwrite each other. Pass
+`--out` and friends explicitly to override.
+
+### Chunks are cut on Site boundaries, never row ranges
+
+This is the property the whole scheme depends on. Institutions are contiguous
+in the sheet but **Sites are not** — 165 hosts are shared by 455 Institution
+records, because `britishcouncil.org` appears fifteen times as separate
+per-country entries. A row-range split fractures **142 Site buckets**, and a
+fractured Site gets its Catalog built twice from two partial row sets, has the
+Variant Sibling sharing rule applied to each half separately, and has its
+Extraction Health measured against a row count that is missing rows.
+
+`tools/split_by_site.py` therefore imports `load_rows` and `group_by_site`
+rather than reimplementing the Site rule, so the split and the pipeline agree
+by construction.
+
+### Equal rows is not equal time
+
+Chunks are balanced on row count, but wall-clock tracks **Site count**, because
+most of the cost is per-Site probing. At 20 chunks expect roughly 1–27 minutes
+each. One chunk is a single 5,083-row Site — the ANZSCO visa occupation codes
+on `homeaffairs.gov.au`, which are not courses at all and which no crawl can
+resolve. `--report` prints the spread before you commit to a split.
+
+The 60 rows with no usable `website` go to `chunks/no_website.csv` rather than
+into a chunk: they cannot be crawled, and padding them into a chunk would
+inflate its row count while costing no time.
+
+### Staleness
+
+`chunks/manifest.json` records a SHA-256 of the sheet the chunks were cut from.
+`run.py` warns when a chunk no longer matches the current `final_courses.csv`.
+Regenerate chunks with the tool after the sheet changes — never edit a chunk by
+hand.
 
 ## Outputs
 

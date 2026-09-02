@@ -113,8 +113,31 @@ with path probing alone to **446 (62.9%)** once prior URLs seeded the crawl.
    `docs/CALIBRATION.md`.
 4. **Then** decide on Phase 2.
 
+## Running in chunks
+
+`tools/split_by_site.py --chunks 20` writes `chunks/final_courses.NNN.csv`;
+`run.py --input chunks/...` runs one; `tools/merge_chunks.py` combines the
+results. Output paths are auto-suffixed from the chunk number.
+
+**Never split the sheet by row range.** 165 hosts are shared by 455 Institution
+records, so a row split fractures 142 Site buckets — each would get two partial
+Catalogs, the sharing rule applied to half its rows at a time, and Extraction
+Health measured against an incomplete row count. The splitter imports
+`load_rows`/`group_by_site` so it cannot drift from the pipeline's own Site
+definition.
+
+Chunking does **not** reduce total Phase 1 time. It exists so a complete
+vertical slice (Phase 1 -> Phase 2 -> adjudication) can be proven on part of the
+sheet before Phase 2 spends money on all 52,781 rows.
+
 ## Gotchas that are not obvious from the code
 
+- **Chunk files go stale silently if you let them.** `chunks/manifest.json`
+  holds a SHA-256 of the sheet they came from and `run.py` warns on a
+  mismatch, but only the tool should ever produce them.
+- **Equal-row chunks are not equal-time chunks.** Wall-clock tracks Site count,
+  not rows: at 20 chunks the spread is ~1-27 minutes, and one chunk is a single
+  5,083-row Site.
 - **After changing anything in `pipeline/catalog.py`, pass
   `--refresh-catalogs`.** Otherwise stale `catalogs/*.json` are reused and your
   change appears to do nothing. `SCHEMA_VERSION` in `catalog.py` only forces a

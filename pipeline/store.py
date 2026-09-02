@@ -172,6 +172,42 @@ class Store:
         self.conn.commit()
 
     # ---------------------------------------------------------------- results
+    def record_row_results(self, run_id: str, results, site_key_of=None) -> None:
+        """Store per-row outcomes only, without touching URL history.
+
+        Called once per site while the run is in flight, so a killed run keeps
+        the sites it finished. History is deliberately *not* written here:
+        `_touch_history` derives drift by comparing against the last URL
+        recorded for a course, so writing history mid-run would make the
+        end-of-run drift count read zero for every row.
+
+        Safe to call repeatedly — the primary key is (course_id, run_id) and
+        the write is INSERT OR REPLACE, so the end-of-run pass overwrites these
+        rows with their post-Verification status.
+        """
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO row_results (course_id, run_id, site_key, "
+            "url, score, margin, live_score, status, flags) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            self._result_rows(run_id, results, site_key_of))
+        self.conn.commit()
+
+    def _result_rows(self, run_id: str, results, site_key_of=None) -> list:
+        """Flatten MatchResults into row_results tuples."""
+        rows = []
+        for r in results:
+            rows.append((
+                r.row.id, run_id,
+                site_key_of(r) if site_key_of else r.row.site_host,
+                r.url or None,
+                r.score if r.candidate else None,
+                r.margin if r.candidate else None,
+                r.live_score,
+                r.status,
+                ";".join(r.row.flags + r.flags),
+            ))
+        return rows
+
     def record_results(self, run_id: str, results, site_key_of=None) -> int:
         """Store this run's per-row outcomes and update URL history.
 
