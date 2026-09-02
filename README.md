@@ -88,6 +88,53 @@ occupation codes on a government site, which no crawl can resolve; ranking on
 raw counts would spend the first slot on guaranteed waste. A full run still
 covers every bucket.
 
+### Reading a run afterwards
+
+Every stage logs, and `logger` names the stage — `pipeline.load`,
+`pipeline.catalog`, `pipeline.match` — so a run is filterable without
+re-executing it.
+
+| level | per site | full run | what it holds |
+|---|---|---|---|
+| INFO (default) | ~5 records | **~13 MB** | `load.done`, `seeds.found`, `crawl.done`, `ladder.step`, `catalog.built`, `match.done` |
+| DEBUG (`--verbose`) | ~870 records | **~92 MB** | plus `crawl.page`, `crawl.skip`, `match.row`, `verify.row` |
+
+The INFO records *show* the run rather than describing it: `seeds.found`
+carries the actual seed URLs, `catalog.built` a bounded sample of
+`(name, url)` Candidates, `match.done` sample matches with their scores. Full
+Catalogs live in `catalogs/<host>.json`; the log points at them rather than
+copying thousands of Candidates into every run.
+
+`crawl.skip` is aggregated, not per link — `crawl.done` counts every skipped
+link by reason, while only a handful are named individually: those whose anchor
+text *looks like a course* but whose path was rejected. That is the Coventry
+failure, where 188 plausible course links were silently discarded by a path
+filter. Naming every rejected link instead produced 40,562 records for a single
+site.
+
+Retention is `--keep-logs`, default 20 previous runs, `0` to keep everything.
+Runs are pruned whole — JSONL, readable log and rotation backups together — and
+the current run is never touched. Ordering is by file mtime rather than by name,
+because the readable run id sorts *before* the older compact one.
+
+### Long runs
+
+`nohup … &` is not enough — a full run launched that way died with its parent
+shell after 8 sites. Detach it properly:
+
+```bash
+setsid nohup python3 -u run.py --workers 16 < /dev/null >> logs/console.out 2>&1 &
+```
+
+Both forms of the log land in `logs/` on their own — `<run_id>.jsonl` for
+querying and `<run_id>.log` for reading — so the redirect above only catches
+anything printed before logging starts, such as a traceback during argument
+parsing. `logs/` and any stray `*.log` are gitignored.
+
+Interrupting is safe either way: the CSVs are written only at the end, so a
+killed run produces no partial outputs, but every fetched page and extracted
+Catalog is already on disk and the next run resumes from them.
+
 ### Resuming
 
 There is no stage flag, because the caches make one unnecessary. Two layers
@@ -111,7 +158,8 @@ seconds** and 2 network requests. Delete `.cache/` to force a refetch, or pass
 | `coverage_report.md` | coverage %, Review Queue size, per-Institution Extraction Health — the input to the Phase 2 spend decision |
 | `calibration_sample.csv` | ~150 stratified rows for one-time human labelling to fit thresholds |
 | `pipeline.db` | run state, per-row results and URL history (ADR-0005) |
-| `logs/<run_id>.jsonl` | one JSON object per event, with `site_key`, `candidates`, `diagnosis` and friends as top-level fields |
+| `logs/<run_id>.jsonl` | one JSON object per event, with `site_key`, `candidates`, `failure_reason` and friends as top-level fields |
+| `logs/<run_id>.log` | the same run as readable console lines |
 
 ### `matched_status` values
 
@@ -226,6 +274,16 @@ listings and fills ~73% of rows. Institutions behind JavaScript course finders
 (Abertay) yield nothing at all and are reported `no_catalog`. A separate class
 again simply **refuses** the crawler: ACU answers 403 to all 16 hub-path
 probes, and no crawl tuning reaches it.
+
+**A refusal outranks every other diagnosis.** A site whose own host rejects the
+crawler is reported `blocked` even when a satellite subdomain works and even
+when the Catalog merely ended up thin. This matters because the two live in
+different sections of the report: `blocked` is *not fixable by crawling*, and
+mistaking it for `thin` sends a reader hunting a crawler bug that does not
+exist. Detection reads the statuses observed on the host **most rows actually
+name** — measured per full host, since collapsing `www.newcastle.edu.au`
+(403×60) with `internationalcollege.newcastle.edu.au` (200×37) hides the
+refusal completely.
 
 **Extraction Health is a proxy, not a measurement.** It compares Candidate
 count against Course Row count, which detects "found too little" but not

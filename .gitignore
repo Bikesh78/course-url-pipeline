@@ -12,8 +12,13 @@ pipeline.db
 pipeline.db-wal
 pipeline.db-shm
 
-# Per-run JSONL logs.
+# Per-run logs: <run_id>.jsonl (structured) and <run_id>.log (readable).
 logs/
+
+# Stray console redirects. run.py writes its own readable log into logs/, but a
+# launch command may still redirect stdout somewhere, and stage1.log landed in
+# the repo root untracked and unignored.
+*.log
 
 # Pipeline outputs. The input CSV is the only data this repo tracks.
 courses_filled.csv
@@ -24,3 +29,4 @@ calibration_sample.csv
 __pycache__/
 *.py[cod]
 .venv/
+.~lock.*

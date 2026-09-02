@@ -21,7 +21,7 @@ import urllib.parse
 from pipeline.catalog import (SCHEMA_VERSION, Catalog, build_catalog,
                               page_heading, page_title)
 from pipeline.fetch import Fetcher, registrable
-from pipeline.logging_setup import setup_logging
+from pipeline.logging_setup import set_current_site, setup_logging
 from pipeline.store import DEFAULT_DB, Store, new_run_id
 from pipeline.load import (DEFAULT_INPUT, dedupe, group_by_site, load_rows,
                            normalise_website, site_display_name)
@@ -98,6 +98,11 @@ def verify(fetcher: Fetcher, res: MatchResult, th: Thresholds) -> None:
     heading = page_heading(page.text) or page_title(page.text)
     live = score_pair(res.row.name, heading, res.row.institution_name)
     res.live_score = live
+    logging.getLogger("pipeline.verify").debug(
+        f"verify {live:.3f} {res.url}",
+        extra={"event": "verify.row", "course_id": res.row.id,
+               "url": res.url, "live_score": round(live, 4),
+               "heading": heading[:120], "status_before": res.status})
     if live >= th.confident and res.status == "confident":
         res.status = "confident"
     elif res.status == "confident":
@@ -156,12 +161,22 @@ def process_site(fetcher: Fetcher, site_key: str, rows: list,
 
     Returns (results, health) where health feeds the coverage report.
     """
+    # Every record emitted from any module on this thread now carries
+    # site_key, without threading it through a dozen signatures.
+    set_current_site(site_key)
     institution = site_display_name(rows)
-    website = ""
+    # The website most rows actually point at, not whichever row happened to
+    # come first. A bucket spans hosts: 535 of Newcastle's 545 rows name
+    # www.newcastle.edu.au and 10 name its International College, and taking
+    # the first row picked the College — so hub probing went to a satellite,
+    # and the refusal on the host 98% of the rows belong to was never seen.
+    site_votes: dict[str, int] = {}
     for r in rows:
-        website = normalise_website(r.website)
-        if website:
-            break
+        w = normalise_website(r.website)
+        if w:
+            site_votes[w] = site_votes.get(w, 0) + 1
+    website = max(sorted(site_votes), key=lambda w: site_votes[w]) \
+        if site_votes else ""
 
     # Distinct prior URLs for this site, most-repeated first: a URL several
     # rows already point at is more likely to be a real course page.
@@ -242,7 +257,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--log-dir", default="logs",
                     help="directory for per-run JSONL logs")
     ap.add_argument("--verbose", action="store_true",
-                    help="log per-row decisions, not just per-site outcomes")
+                    help="log per-page and per-row detail; ~175MB over a full "
+                         "run, so prefer it on a single site")
+    ap.add_argument("--keep-logs", type=int, default=20,
+                    help="previous runs of logs to retain; 0 keeps everything")
     ap.add_argument("--dry-run", action="store_true",
                     help="report the planned work and exit")
     ap.add_argument("--confident", type=float, default=None)
@@ -260,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
 
     run_id = new_run_id()
     log_path = setup_logging(run_id, args.log_dir, verbose=args.verbose,
-                             quiet=args.dry_run)
+                             quiet=args.dry_run, keep_runs=args.keep_logs)
     log = logging.getLogger("run")
 
     rows = load_rows(args.input)
@@ -350,7 +368,12 @@ def main(argv: list[str] | None = None) -> int:
                        "candidates": h.get("candidates"),
                        "strategy": h.get("strategy"),
                        "healthy": bool(h.get("healthy")),
-                       "diagnosis": h.get("diagnosis"),
+                       # `failure_reason`, not `diagnosis`: process_site
+                       # writes the former and report.py reads the former, so
+                       # the log used a key that never existed and every record
+                       # carried a null. It is the field you grep to answer
+                       # "why did these sites fail".
+                       "failure_reason": h.get("failure_reason"),
                        "rows": len(res), "filled": filled})
             if store:
                 website = next((normalise_website(r.row.website) for r in res
@@ -404,7 +427,8 @@ def main(argv: list[str] | None = None) -> int:
     if store:
         log.info(f"store: {args.db} (run {run_id}; {drifted} URLs changed "
                  f"since the previous run)")
-    log.info(f"logs: {log_path}")
+    log.info(f"logs: {log_path} (structured) and "
+             f"{log_path[:-len('.jsonl')]}.log (readable)")
     log.info(f"fetch: {fetcher.stats.requests} requests, "
              f"{fetcher.stats.cache_hits} cache hits, "
              f"{fetcher.stats.errors} errors, "

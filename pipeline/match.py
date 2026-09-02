@@ -73,6 +73,7 @@ took it, and it is not your variant" is a sentence a reviewer can act on.
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -96,6 +97,8 @@ PREFILTER_MIN = 0.30    # below this a pair is not worth ranking
 # page. The cap is a backstop behind the Variant Sibling test, not the primary
 # guard.
 SHARE_CAP = 8
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -363,7 +366,51 @@ def assign(rows: list[CourseRow], catalog: Catalog, institution: str = "",
     _drop_offsite_urls(results, catalog)
     _flag_share_groups(results)
     _assert_shares_are_justified(results)
+    _log_assignment(results, cands, scored)
     return results
+
+
+def _log_assignment(results: list[MatchResult], cands: list[Candidate],
+                    scored: dict[str, list[tuple[float, int]]]) -> None:
+    """Emit `match.done`, plus a per-row `match.row` at DEBUG.
+
+    The sample is what makes a coverage figure checkable: a reviewer can see
+    which rows got which URL at what score without opening the CSV.
+    """
+    statuses: dict[str, int] = {}
+    for r in results:
+        statuses[r.status] = statuses.get(r.status, 0) + 1
+    shares: dict[str, int] = {}
+    for r in results:
+        if r.url:
+            shares[r.url] = shares.get(r.url, 0) + 1
+    denied = sum(1 for r in results
+                 if any(f.startswith("share_denied") for f in r.flags))
+    filled = [r for r in results if r.url]
+
+    log.info(f"match: {len(filled)}/{len(results)} filled",
+             extra={"event": "match.done", "rows": len(results),
+                    "filled": len(filled),
+                    "pairs_scored": sum(len(v) for v in scored.values()),
+                    "candidates": len(cands),
+                    "statuses": statuses,
+                    "share_groups": sum(1 for n in shares.values() if n > 1),
+                    "rows_sharing": sum(n for n in shares.values() if n > 1),
+                    "share_denied": denied,
+                    "sample": [{"row": r.row.name[:80],
+                                "url": r.url,
+                                "score": round(r.score, 3),
+                                "margin": round(r.margin, 3),
+                                "status": r.status}
+                               for r in filled[:10]]})
+
+    for r in results:
+        log.debug(f"row {r.status}: {r.row.name[:60]}",
+                  extra={"event": "match.row", "course_id": r.row.id,
+                         "row": r.row.name[:120], "url": r.url,
+                         "score": round(r.score, 4),
+                         "margin": round(r.margin, 4), "status": r.status,
+                         "flags": r.row.flags + r.flags})
 
 
 def _flag_share_groups(results: list[MatchResult]) -> None:

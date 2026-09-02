@@ -160,6 +160,68 @@ class TestCatalogSchemaVersioning(unittest.TestCase):
         self.assertEqual(len(cat.candidates), 1)
 
 
+class TestMajorityWebsite(unittest.TestCase):
+    """A site bucket spans hosts; probing must target the one most rows use.
+
+    Newcastle's bucket holds 545 rows: 535 name www.newcastle.edu.au and 10
+    name its International College. Taking whichever row came first picked the
+    College, so hub probing went to a satellite and the refusal on the host 98%
+    of the rows belong to was never observed.
+    """
+
+    def _website_passed(self, rows):
+        import run as run_mod
+        seen = {}
+
+        def fake_loader(fetcher, site_key, website, expected_rows, **kw):
+            seen["website"] = website
+            return Catalog(site_key, [Candidate("X", DS, "ug")],
+                           strategy="listing", domains=["aber.ac.uk"])
+
+        original = run_mod.load_or_build_catalog
+        run_mod.load_or_build_catalog = fake_loader
+        try:
+            run_mod.process_site(StubFetcher({}), "newcastle.edu.au", rows,
+                                 Thresholds(), args())
+        finally:
+            run_mod.load_or_build_catalog = original
+        return seen["website"]
+
+    def _rows(self, majority, minority, n_major, n_minor):
+        out = [CourseRow(f"m{i}", f"Course {i} BSc", "Newcastle", majority)
+               for i in range(n_major)]
+        out += [CourseRow(f"s{i}", f"Course {i} BSc", "Newcastle College",
+                          minority) for i in range(n_minor)]
+        return out
+
+    def test_the_majority_host_wins(self):
+        rows = self._rows("https://www.newcastle.edu.au/",
+                          "https://internationalcollege.newcastle.edu.au/",
+                          535, 10)
+        self.assertEqual(self._website_passed(rows),
+                         "https://www.newcastle.edu.au/")
+
+    def test_order_does_not_decide_it(self):
+        """The minority host first must not win, which is the original bug."""
+        rows = self._rows("https://www.newcastle.edu.au/",
+                          "https://internationalcollege.newcastle.edu.au/",
+                          535, 10)
+        rows.reverse()
+        self.assertEqual(self._website_passed(rows),
+                         "https://www.newcastle.edu.au/")
+
+    def test_a_tie_is_resolved_deterministically(self):
+        rows = self._rows("https://a.ac.uk/", "https://b.ac.uk/", 3, 3)
+        first = self._website_passed(rows)
+        rows.reverse()
+        self.assertEqual(self._website_passed(rows), first)
+
+    def test_rows_without_a_website_are_ignored(self):
+        rows = self._rows("https://www.newcastle.edu.au/", "", 2, 9)
+        self.assertEqual(self._website_passed(rows),
+                         "https://www.newcastle.edu.au/")
+
+
 class TestFailClosed(unittest.TestCase):
     """An unhealthy Catalog must produce no URLs at all (ADR-0001)."""
 

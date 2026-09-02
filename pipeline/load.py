@@ -8,6 +8,7 @@ by editing the source.
 from __future__ import annotations
 
 import csv
+import logging
 import os
 import re
 import sys
@@ -16,6 +17,8 @@ from dataclasses import dataclass, field
 
 from pipeline.fetch import registrable
 from pipeline.normalize import normalize_name
+
+log = logging.getLogger(__name__)
 
 csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
 
@@ -268,7 +271,9 @@ def load_rows(path: str = DEFAULT_INPUT) -> list[CourseRow]:
         return []
 
     if "institution_id" in raw_rows[0]:
-        return _load_final(raw_rows)
+        rows = _load_final(raw_rows)
+        _log_loaded(rows, path, "final")
+        return rows
 
     body = raw_rows[1:]
 
@@ -358,6 +363,26 @@ def _apply_flags(row: CourseRow) -> None:
         row.flags.append("aggregator_website")
     if not row.website or not re.match(r"^(https?://|www\.)", row.website):
         row.flags.append("unusable_website")
+
+
+def _log_loaded(rows: list[CourseRow], path: str, schema: str) -> None:
+    """Record what came out of the sheet, so a run starts from stated facts."""
+    flags: dict[str, int] = {}
+    for r in rows:
+        for f in r.flags:
+            flags[f] = flags.get(f, 0) + 1
+    sites = {r.site_host for r in rows}
+    log.info(f"loaded {len(rows)} rows from {path}",
+             extra={"event": "load.done", "input": path, "schema": schema,
+                    "rows": len(rows),
+                    "institutions": len({r.institution_key for r in rows}),
+                    "sites": len(sites - {""}),
+                    "rows_without_website": sum(1 for r in rows
+                                                if not r.site_host),
+                    "work_items": len({r.work_key for r in rows}),
+                    "rows_with_prior_url": sum(1 for r in rows if r.prior_urls),
+                    "flags": dict(sorted(flags.items(),
+                                         key=lambda kv: -kv[1]))})
 
 
 def _load_final(raw_rows: list[list[str]]) -> list[CourseRow]:

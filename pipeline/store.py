@@ -104,8 +104,19 @@ def now_iso() -> str:
 
 
 def new_run_id() -> str:
-    """A sortable, unique identifier for one run."""
-    return (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    """A sortable, readable, unique identifier for one run.
+
+    Doubles as the log filename prefix, which is why it is spelled out rather
+    than compact: `2026-09-01T11-24-23Z-a05b40` reads as a date at a glance
+    where `20260901T112423Z` does not. Hyphens stand in for the time's colons,
+    which are not portable in filenames.
+
+    Lexical order is chronological *within* this format. It is not comparable
+    with the older compact format — "2026-09-02..." sorts before "20260901..."
+    because "-" precedes "0" — so anything ordering runs by age uses file mtime
+    or the `runs.started` column rather than the id. `prune_old_runs` does.
+    """
+    return (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
             + "-" + uuid.uuid4().hex[:6])
 
 
@@ -152,7 +163,12 @@ class Store:
             "candidates, healthy, diagnosis, notes) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (site_key, run_id, health.get("strategy"),
              health.get("candidates"), 1 if health.get("healthy") else 0,
-             health.get("diagnosis"), json.dumps(health.get("notes") or [])))
+             # `failure_reason`, not `diagnosis`: process_site writes the
+             # former, so this column was silently null on every row. The
+             # column keeps its name — renaming it would break existing
+             # databases, which are created with CREATE TABLE IF NOT EXISTS.
+             health.get("failure_reason"),
+             json.dumps(health.get("notes") or [])))
         self.conn.commit()
 
     # ---------------------------------------------------------------- results

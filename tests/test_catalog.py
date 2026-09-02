@@ -2,15 +2,30 @@
 
 import unittest
 
+import pipeline.catalog as catalog_module
+
 from pipeline.fetch import FetchResult
 from pipeline.catalog import (
     build_catalog,
     SCHEMA_VERSION, Candidate, Catalog, _AUTH_PATH, _slug_to_name,
-    classify_probes, clean_url, extract_links, level_from_url,
+    classify_probes, clean_url, extract_links, host_is_refusing,
+    level_from_url,
     looks_like_course_name, page_heading, page_title, url_specificity,
 )
 
 ANTH = "https://courses.aber.ac.uk/undergraduate/anthropology/"
+
+# Observed seeds for this shape: the university's own course page (which
+# refuses) and its International College (which works).
+NEWCASTLE_PRIORS = [
+    "https://www.newcastle.edu.au/degrees/",
+    "https://internationalcollege.newcastle.edu.au/",
+]
+
+LISTING = ("<html><body>"
+           "<a href='/study/undergraduate/business/'>Business BA (Hons)</a>"
+           "<a href='/study/undergraduate/law/'>Law LLB (Hons)</a>"
+           "</body></html>")
 
 HTML = """
 <html><head><title>Aberystwyth University - Data Science 7G73 BSc</title></head>
@@ -318,6 +333,39 @@ class _StubFetcher:
         return []
 
 
+class TestHostIsRefusing(unittest.TestCase):
+    """Did one specific host refuse us? Separate from `classify_probes`.
+
+    `classify_probes` reads 16 *guessed* paths and must tolerate a site whose
+    URLs simply differ. This reads a host's own answers, where the signal is
+    unambiguous. Fixtures are real per-host counts from a measured run.
+    """
+
+    def test_a_host_that_only_ever_refuses(self):
+        self.assertTrue(host_is_refusing({403: 45}))          # www.monash.edu
+        self.assertTrue(host_is_refusing({403: 60}))          # www.newcastle
+        self.assertTrue(host_is_refusing({403: 100}))         # www.herts.ac.uk
+
+    def test_a_healthy_host_is_not_refusing(self):
+        self.assertFalse(host_is_refusing({200: 408, 404: 10}))   # www.sydney
+        self.assertFalse(host_is_refusing({200: 65, 404: 12}))    # www.aber
+
+    def test_a_404_only_host_is_not_refusing(self):
+        """404 says "wrong path", not "no". That is `no_hub`, not blocked."""
+        self.assertFalse(host_is_refusing({404: 16}))
+
+    def test_one_refusal_among_successes_is_not_refusing(self):
+        # A restricted page on an otherwise open host.
+        self.assertFalse(host_is_refusing({200: 100, 403: 3}))
+
+    def test_nothing_observed_is_not_refusing(self):
+        self.assertFalse(host_is_refusing({}))
+
+    def test_every_refusal_status_counts(self):
+        for code in (401, 403, 429, 451):
+            self.assertTrue(host_is_refusing({code: 5}), code)
+
+
 class TestBlockedOutranksSymptoms(unittest.TestCase):
     """A refused site must be reported as refused, not as its side effects.
 
@@ -351,6 +399,119 @@ class TestBlockedOutranksSymptoms(unittest.TestCase):
         rules = [(lambda u: "courses.x.ac.uk" in u, 200, "<html></html>")]
         cat = build_catalog(_StubFetcher(rules), "X", "https://www.x.ac.uk", 201)
         self.assertNotEqual(cat.failure_reason, "blocked")
+
+
+class TestRefusalOnTheSiteOwnHost(unittest.TestCase):
+    """A site whose own host refuses is `blocked`, whatever a satellite does.
+
+    Both fixtures are real shapes from a measured run. Hub probing alone missed
+    them, because seeds derived from prior URLs never pass through it and the
+    working satellite drowned the refusal in any aggregate count.
+    """
+
+    # Faithful to the observed run: the 16 guessed hub paths 404, and only the
+    # real course page — reached from a prior URL, never through hub probing —
+    # refuses. Making the hub paths 403 instead would let the pre-existing
+    # `classify_probes` catch it and the test would pass without the fix.
+    NEWCASTLE = [
+        (lambda u: "internationalcollege.newcastle.edu.au" in u, 200, LISTING),
+        (lambda u: u.rstrip("/").endswith("/degrees"), 403, ""),
+        (lambda u: "www.newcastle.edu.au" in u, 404, ""),
+    ]
+
+    def test_hub_404s_but_the_real_course_page_refuses(self):
+        cat = build_catalog(_StubFetcher(self.NEWCASTLE), "Newcastle",
+                            "https://www.newcastle.edu.au", 545,
+                            prior_urls=NEWCASTLE_PRIORS)
+        self.assertEqual(cat.failure_reason, "blocked")
+
+    def test_without_the_own_host_check_it_would_read_as_no_hub(self):
+        """Pins *why* this test exists, so it cannot silently stop testing it.
+
+        Neutralising `host_is_refusing` must change the verdict. If it does not,
+        the fixture is being caught by hub-probe classification instead and is
+        no longer exercising the fix.
+        """
+        original = catalog_module.host_is_refusing
+        catalog_module.host_is_refusing = lambda counts: False
+        try:
+            cat = build_catalog(
+                _StubFetcher(self.NEWCASTLE), "Newcastle",
+                "https://www.newcastle.edu.au", 545,
+                prior_urls=NEWCASTLE_PRIORS)
+        finally:
+            catalog_module.host_is_refusing = original
+        self.assertNotEqual(cat.failure_reason, "blocked")
+
+    def test_a_working_satellite_does_not_disguise_the_refusal(self):
+        """The satellite yields Candidates; the site is still reported blocked."""
+        cat = build_catalog(_StubFetcher(self.NEWCASTLE), "Newcastle",
+                            "https://www.newcastle.edu.au", 545,
+                            prior_urls=NEWCASTLE_PRIORS)
+        self.assertTrue(cat.candidates, "satellite should still contribute")
+        self.assertEqual(cat.failure_reason, "blocked")
+
+    def test_a_genuinely_thin_site_is_still_thin(self):
+        """The guard: ordinary shortfalls must not be relabelled as refusals."""
+        rules = [(lambda u: "www.thin.ac.uk" in u, 200, LISTING)]
+        cat = build_catalog(_StubFetcher(rules), "Thin",
+                            "https://www.thin.ac.uk", 400)
+        self.assertFalse(cat.healthy(400))
+        self.assertNotEqual(cat.failure_reason, "blocked")
+
+    def test_a_refusing_satellite_does_not_block_a_healthy_site(self):
+        """Sydney's `intranet.` answers 403 nine times; Sydney is not blocked."""
+        rules = [
+            (lambda u: "intranet.sydney.edu.au" in u, 403, ""),
+            (lambda u: "sydney.edu.au" in u, 200, LISTING),
+        ]
+        cat = build_catalog(_StubFetcher(rules), "Sydney",
+                            "https://www.sydney.edu.au", 4,
+                            prior_urls=["https://intranet.sydney.edu.au/x/"])
+        self.assertNotEqual(cat.failure_reason, "blocked")
+
+
+class TestCatalogLogging(unittest.TestCase):
+    """The log must show what was found, bounded, without re-running anything."""
+
+    def _records(self, verbose=False):
+        import json, logging, tempfile
+        from pipeline.logging_setup import setup_logging
+        d = tempfile.mkdtemp()
+        path = setup_logging("2026-01-01T00-00-00Z-test", log_dir=d,
+                             quiet=True, verbose=verbose)
+        rules = [(lambda u: "courses.x.ac.uk" in u, 200, LISTING),
+                 (lambda u: True, 200, LISTING)]
+        build_catalog(_StubFetcher(rules), "X", "https://www.x.ac.uk", 4)
+        logging.shutdown()
+        with open(path, encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    def test_catalog_built_carries_a_bounded_sample(self):
+        """A 4,767-Candidate Catalog must not put 4,767 entries in the log."""
+        rec = next(r for r in self._records() if r.get("event") == "catalog.built")
+        self.assertIn("sample", rec)
+        self.assertLessEqual(len(rec["sample"]), 10)
+        self.assertIn("name", rec["sample"][0])
+        self.assertIn("url", rec["sample"][0])
+
+    def test_seeds_are_shown_not_just_counted(self):
+        rec = next(r for r in self._records() if r.get("event") == "seeds.found")
+        self.assertTrue(rec["seeds"], "the actual seed URLs must be logged")
+        self.assertEqual(rec["seed_count"], len(rec["seeds"]))
+
+    def test_skipped_links_are_counted_even_though_few_are_named(self):
+        """Aggregate, not per link: naming each produced 40,562 records/site."""
+        rec = next(r for r in self._records() if r.get("event") == "crawl.done")
+        self.assertIn("links_skipped", rec)
+        self.assertIsInstance(rec["links_skipped"], dict)
+
+    def test_per_page_detail_only_appears_when_verbose(self):
+        quiet = [r for r in self._records() if r.get("event") == "crawl.page"]
+        loud = [r for r in self._records(verbose=True)
+                if r.get("event") == "crawl.page"]
+        self.assertEqual(quiet, [])
+        self.assertTrue(loud)
 
 
 class TestPageBudget(unittest.TestCase):

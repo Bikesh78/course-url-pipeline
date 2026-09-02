@@ -43,23 +43,62 @@ class TestRunLifecycle(StoreCase):
         self.assertEqual(runs[0]["filled"], 40)
         self.assertIsNotNone(runs[0]["finished"])
 
-    def test_run_ids_sort_chronologically(self):
-        self.assertLess(new_run_id()[:15], "99999999T999999")
+    def test_run_id_is_readable_and_filename_safe(self):
+        """It doubles as the log filename prefix, so it must read as a date."""
+        import re
+        rid = new_run_id()
+        self.assertRegex(rid, r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z-[0-9a-f]{6}$")
+        self.assertFalse(set(rid) & set('/:\\*?"<>|'), rid)
 
-    def test_site_health_is_recorded(self):
+    def test_ids_sort_chronologically_within_the_format(self):
+        earlier = "2026-09-01T10-00-00Z-aaaaaa"
+        later = "2026-09-02T10-00-00Z-aaaaaa"
+        self.assertLess(earlier, later)
+
+    def test_the_two_formats_do_not_sort_against_each_other(self):
+        """Documents why `prune_old_runs` orders by mtime rather than by name.
+
+        "-" (0x2D) precedes "0" (0x30), so every readable id sorts before every
+        compact one regardless of date. Sorting run ids to find the oldest
+        would delete the newest logs first.
+        """
+        self.assertLess("2026-09-02T10-00-00Z-new", "20260801T100000Z-old")
+
+    # The keys `process_site` actually produces. An earlier fixture invented a
+    # `diagnosis` key, which is why it never noticed that the column was null
+    # on every row ever written.
+    HEALTHY = {"strategy": "listing", "candidates": 809, "healthy": True,
+               "failure_reason": "", "notes": ["a note"]}
+    BLOCKED = {"strategy": "none", "candidates": 0, "healthy": False,
+               "failure_reason": "blocked", "notes": ["refused every probe"]}
+
+    def _record(self, site_key, health):
         rid = new_run_id()
         self.store.start_run(rid, "x.csv", {})
-        self.store.record_site(rid, "aber.ac.uk", "Aberystwyth University",
-                               "https://www.aber.ac.uk",
-                               {"strategy": "listing", "candidates": 809,
-                                "healthy": True, "diagnosis": "ok",
-                                "notes": ["a note"]})
-        row = self.store.conn.execute(
-            "SELECT * FROM catalogs WHERE site_key = ?", ("aber.ac.uk",)
-        ).fetchone()
+        self.store.record_site(rid, site_key, site_key, f"https://{site_key}",
+                               health)
+        return self.store.conn.execute(
+            "SELECT * FROM catalogs WHERE site_key = ?", (site_key,)).fetchone()
+
+    def test_site_health_is_recorded(self):
+        row = self._record("aber.ac.uk", self.HEALTHY)
         self.assertEqual(row["candidates"], 809)
         self.assertEqual(row["healthy"], 1)
         self.assertEqual(row["strategy"], "listing")
+
+    def test_why_a_site_failed_is_stored_not_dropped(self):
+        """The field you query to answer "which sites are unreachable"."""
+        row = self._record("monash.edu", self.BLOCKED)
+        self.assertEqual(row["healthy"], 0)
+        self.assertEqual(row["diagnosis"], "blocked")
+
+    def test_blocked_sites_are_queryable(self):
+        self._record("monash.edu", self.BLOCKED)
+        self._record("aber.ac.uk", self.HEALTHY)
+        blocked = self.store.conn.execute(
+            "SELECT site_key FROM catalogs WHERE diagnosis = 'blocked'"
+        ).fetchall()
+        self.assertEqual([r["site_key"] for r in blocked], ["monash.edu"])
 
 
 class TestUrlHistory(StoreCase):
