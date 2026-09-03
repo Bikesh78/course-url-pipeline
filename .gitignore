@@ -25,6 +25,7 @@ logs/
 chunks/
 catalogs.baseline/
 courses_filled.*.csv
+*.csv.bak
 phase2*.csv
 review_queue.*.csv
 coverage_report.*.md

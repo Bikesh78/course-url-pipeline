@@ -278,3 +278,67 @@ class TestRealSplit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProvenanceBackfill(unittest.TestCase):
+    """Adding provenance to a result file produced before the columns existed.
+
+    Re-running phase 1 to obtain them would cost hours of crawling for
+    information already derivable from the source sheet.
+    """
+
+    def _fixture(self, d):
+        source = os.path.join(d, "src.csv")
+        results = os.path.join(d, "res.csv")
+        with open(source, "w", encoding="utf-8", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["id", "course_url", "matched_status"])
+            w.writerow(["1", "https://x.edu.au/a", "matched"])
+            w.writerow(["2", "https://x.edu.au/b", "low_confidence"])
+            w.writerow(["3", "", "unmatched"])
+        with open(results, "w", encoding="utf-8", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["id", "name", "course_url", "matched_status"])
+            w.writerow(["1", "A", "https://www.x.edu.au/a/", "verified"])
+            w.writerow(["2", "B", "", "no_match"])
+            w.writerow(["3", "C", "https://x.edu.au/c", "verified"])
+        return source, results
+
+    def test_columns_are_appended_and_values_correct(self):
+        from tools.backfill_provenance import backfill
+        with tempfile.TemporaryDirectory() as d:
+            source, results = self._fixture(d)
+            fields, rows, counts = backfill(results, source)
+            self.assertEqual(fields[-3:],
+                             ["prior_course_url", "prior_matched_status",
+                              "url_change"])
+            by = {r["id"]: r for r in rows}
+            # www + trailing slash only: the page did not move
+            self.assertEqual(by["1"]["url_change"], "unchanged")
+            self.assertEqual(by["2"]["url_change"], "dropped")
+            self.assertEqual(by["3"]["url_change"], "added")
+
+    def test_the_prior_url_is_preserved_verbatim(self):
+        from tools.backfill_provenance import backfill
+        with tempfile.TemporaryDirectory() as d:
+            source, results = self._fixture(d)
+            _, rows, _ = backfill(results, source)
+            self.assertEqual(rows[0]["prior_course_url"], "https://x.edu.au/a")
+            self.assertEqual(rows[0]["prior_matched_status"], "matched")
+
+    def test_the_delivered_url_is_never_rewritten(self):
+        """Only three columns are added; course_url is left exactly as it was."""
+        from tools.backfill_provenance import backfill
+        with tempfile.TemporaryDirectory() as d:
+            source, results = self._fixture(d)
+            _, rows, _ = backfill(results, source)
+            self.assertEqual(rows[0]["course_url"], "https://www.x.edu.au/a/")
+
+    def test_a_row_absent_from_the_source_is_counted_not_crashed(self):
+        from tools.backfill_provenance import backfill
+        with tempfile.TemporaryDirectory() as d:
+            source, results = self._fixture(d)
+            with open(results, "a", encoding="utf-8", newline="") as fh:
+                csv.writer(fh).writerow(["999", "Z", "", "no_match"])
+            _, rows, counts = backfill(results, source)
+            self.assertEqual(counts["(not in source sheet)"], 1)

@@ -40,6 +40,8 @@ both exist, never to accept one on its own. Ties keep our result.
 from __future__ import annotations
 
 import collections
+import re
+import urllib.parse
 from dataclasses import dataclass, field
 
 from pipeline.catalog import _slug_to_name, clean_url
@@ -92,9 +94,28 @@ def gate_score(name: str, url: str, institution: str) -> float:
     return score(name, _slug_to_name(url), institution)
 
 
+def _page_identity(url: str) -> tuple[str, str, str]:
+    """A URL reduced to what actually identifies a page, for comparison only.
+
+    Looser than `clean_url`, deliberately and only here. `clean_url` defines
+    Candidate identity and feeds the sharing rule, where treating `www.x` and
+    `x` as one host would be an assumption about DNS we have no right to make.
+    But for *"did this course's page move?"*, a scheme upgrade or a `www.`
+    prefix is not a move — 123 rows differed by nothing else and would have
+    been reported as changed.
+    """
+    parts = urllib.parse.urlsplit(clean_url(url))
+    host = re.sub(r"^www\.", "", parts.netloc.lower())
+    return (host, parts.path, parts.query)
+
+
 def _same_page(a: str, b: str) -> bool:
-    """Do two URLs address the same page? Trailing slash is not a difference."""
-    return bool(a) and bool(b) and clean_url(a) == clean_url(b)
+    """Do two URLs address the same page?
+
+    Trailing slash, fragment, tracking parameters, scheme and a `www.` prefix
+    are all not differences.
+    """
+    return bool(a) and bool(b) and _page_identity(a) == _page_identity(b)
 
 
 def classify_change(prior: str, final: str) -> str:

@@ -34,9 +34,16 @@ and nothing in the output said so.
 | `changed` | both have a URL, and they are different pages |
 | `dropped` | the sheet had one; we deliver none |
 
-**A trailing slash, a URL fragment, and tracking query parameters are not
-changes.** `/courses/x` and `/courses/x/` are one page. Before that was fixed,
-729 rows reported a change that was only punctuation.
+**A trailing slash, a fragment, tracking parameters, a `www.` prefix and an
+`http`→`https` upgrade are not changes.** `/courses/x` and `/courses/x/` are one
+page; so are `www.ccs.edu.au/theology/bachelor` and
+`ccs.edu.au/theology/bachelor`. Before that was fixed, 729 rows reported a
+change that was only punctuation and a further 123 only a hostname prefix.
+
+This looser comparison is used *only* for provenance. `clean_url`, which
+defines Candidate identity and feeds the sharing rule, still treats `www.x` and
+`x` as different hosts — collapsing them there would be an assumption about DNS
+the pipeline has no right to make.
 
 `url_change` is computed **after** triage, so a row whose prior URL is restored
 reads `unchanged` rather than `dropped`. The column describes what you actually
@@ -72,6 +79,22 @@ Reading them together:
 | `changed` | `verified` | we replaced the sheet's URL and confirmed ours against the live page |
 | `changed` | `ambiguous` | we replaced it with something we are unsure about — worth reviewing |
 | `dropped` | `no_catalog` | the site could not be read at all; the sheet's URL failed our quality gate |
+
+## Backfilling a result file that predates the columns
+
+A `courses_filled.csv` produced before these columns existed can be brought up
+to date without re-running phase 1, which would cost hours of crawling for
+information the source sheet already implies:
+
+```bash
+python tools/backfill_provenance.py            # report only
+python tools/backfill_provenance.py --write    # keeps a .bak
+```
+
+It appends the three columns and **does not touch `course_url`**. Comparison
+runs through the same page-identity rule used everywhere else, so a trailing
+slash, a `www.` prefix or an `http`→`https` upgrade is correctly reported as
+`unchanged` without the delivered value being rewritten.
 
 ## Asking what has moved over time
 

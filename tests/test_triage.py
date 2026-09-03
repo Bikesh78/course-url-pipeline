@@ -44,6 +44,24 @@ class TestClassifyChange(unittest.TestCase):
     def test_whitespace_is_not_a_change(self):
         self.assertEqual(classify_change(DS, DS + " "), "unchanged")
 
+    def test_a_www_prefix_is_not_a_change(self):
+        # 123 rows differed by nothing else.
+        self.assertEqual(
+            classify_change("https://www.ccs.edu.au/theology/bachelor",
+                            "https://ccs.edu.au/theology/bachelor"),
+            "unchanged")
+
+    def test_a_scheme_upgrade_is_not_a_change(self):
+        self.assertEqual(
+            classify_change("http://x.edu.au/a", "https://x.edu.au/a"),
+            "unchanged")
+
+    def test_a_different_subdomain_is_still_a_change(self):
+        # Only `www.` is treated as cosmetic; a course subdomain is not.
+        self.assertEqual(
+            classify_change("https://x.edu.au/a", "https://courses.x.edu.au/a"),
+            "changed")
+
     def test_a_genuinely_different_page(self):
         self.assertEqual(classify_change(DS, DS_OTHER), "changed")
 
