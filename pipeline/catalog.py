@@ -458,6 +458,10 @@ _VIEW_PARAMS = {"term", "year", "academicyear", "intake", "start", "startdate",
 
 def clean_url(url: str) -> str:
     """Drop fragments and tracking noise so the same page has one identity."""
+    # Anchors in real HTML carry stray whitespace inside href, and it survived
+    # all the way into the output: 18 rows held a URL ending in a space, which
+    # compared unequal to the identical URL without one.
+    url = (url or "").strip()
     try:
         parts = urllib.parse.urlsplit(url)
     except ValueError:
@@ -468,8 +472,14 @@ def clean_url(url: str) -> str:
         [(k, v) for k, v in urllib.parse.parse_qsl(parts.query)
          if k.lower() not in _VIEW_PARAMS
          and not k.lower().startswith(("utm_", "fbclid", "gclid"))])
+    # A trailing slash never distinguishes two pages, but it did distinguish
+    # two Candidates: `/courses/x` and `/courses/x/` were separate URLs, so a
+    # Share Group could hold the same page twice and 729 rows read as having a
+    # changed URL when only the slash differed. The root `/` is preserved,
+    # since dropping it yields a bare-host URL rather than a path.
+    path = parts.path.rstrip("/") or "/"
     return urllib.parse.urlunsplit(
-        (parts.scheme, parts.netloc, parts.path, query, ""))
+        (parts.scheme, parts.netloc, path, query, ""))
 
 
 def level_from_url(url: str) -> str | None:

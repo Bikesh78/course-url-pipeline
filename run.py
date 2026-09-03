@@ -15,6 +15,7 @@ import os
 import re
 import sys
 import logging
+import csv
 import time
 import urllib.parse
 
@@ -22,8 +23,12 @@ from pipeline.catalog import (SCHEMA_VERSION, Catalog, build_catalog,
                               page_heading, page_title)
 from pipeline.fetch import Fetcher, registrable
 from pipeline.logging_setup import set_current_site, setup_logging
+from pipeline.search import (FixtureProvider, NullProvider, build_query,
+                            on_site, searchable_rows)
 from pipeline.store import DEFAULT_DB, Store, new_run_id
-from pipeline.load import (DEFAULT_INPUT, dedupe, group_by_site, load_rows,
+from pipeline.triage import triage_rows
+from pipeline.load import (DEFAULT_INPUT, _host_of, dedupe, group_by_site,
+                           load_rows,
                            normalise_website, site_display_name)
 from pipeline.match import MatchResult, Thresholds, assign
 from pipeline.normalize import score as score_pair
@@ -267,6 +272,92 @@ def process_site(fetcher: Fetcher, site_key: str, rows: list,
     return out, health
 
 
+def run_phase2(args, run_id: str, log) -> int:
+    """Prior-URL triage, then search, over an existing phase 1 result file.
+
+    Reads and writes CSV rows as plain dicts rather than reconstructing
+    MatchResult objects: phase 2 makes decisions about *two URLs*, and nothing
+    it does needs the Candidate graph that phase 1 built.
+
+    No network is required for triage. Search issues requests only if a
+    provider is configured; the default returns nothing, so the stage is
+    inert rather than broken when no vendor has been chosen.
+    """
+    with open(args.input, encoding="utf-8-sig", newline="") as fh:
+        source = {r["id"]: r for r in csv.DictReader(fh)}
+    with open(args.results, encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+
+    before = sum(1 for r in rows if (r.get("course_url") or "").strip())
+    log.info(f"phase 2 over {len(rows)} rows from {args.results} "
+             f"({before} filled)",
+             extra={"run_id": run_id, "rows": len(rows), "filled": before})
+
+    store = Store(args.db) if args.db else None
+    if store:
+        store.start_run(run_id, args.input, vars(args))
+        seeded = store.seed_baseline(source.values())
+        log.info(f"url_history: seeded {seeded} baseline rows from the sheet",
+                 extra={"run_id": run_id, "seeded": seeded})
+
+    stats = triage_rows(rows, source)
+    after = sum(1 for r in rows if (r.get("course_url") or "").strip())
+    log.info(f"triage: adopted {stats.adopted} prior URLs "
+             f"({stats.adopted_blank} blank, {stats.adopted_dead} dead, "
+             f"{stats.adopted_weak} weak); rejected {stats.rejected_by_gate} "
+             f"by quality gate and {stats.rejected_by_sharing} by the sharing "
+             f"rule",
+             extra={"run_id": run_id, "adopted": stats.adopted,
+                    "rejected_gate": stats.rejected_by_gate,
+                    "rejected_sharing": stats.rejected_by_sharing})
+
+    provider = (FixtureProvider(path=args.search_fixture)
+                if args.search_fixture else NullProvider())
+    targets = searchable_rows(rows)
+    hits = 0
+    for r in targets:
+        site = _host_of(r.get("website", ""))
+        if not site:
+            continue
+        for url in provider.search(
+                build_query(r.get("name", ""), r.get("institution_name", ""),
+                            site), site):
+            if on_site(url, site):
+                hits += 1
+                break
+    log.info(f"search: {len(targets)} rows eligible, "
+             f"{hits} on-site results from "
+             f"{type(provider).__name__}"
+             + ("" if args.search_fixture else
+                " (no vendor configured — see docs/PHASE-2.md)"),
+             extra={"run_id": run_id, "search_targets": len(targets),
+                    "search_hits": hits,
+                    "provider": type(provider).__name__})
+
+    fields = list(rows[0].keys()) if rows else []
+    with open(args.out, "w", encoding="utf-8", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=fields)
+        w.writeheader()
+        w.writerows(rows)
+
+    drifted = 0
+    if store:
+        drifted = store.record_url_rows(run_id, rows)
+        store.finish_run(run_id, len(rows), after)
+        log.info(f"url_history: {drifted} courses now hold a different URL "
+                 f"than the sheet delivered",
+                 extra={"run_id": run_id, "drifted": drifted})
+        store.close()
+
+    log.info("")
+    log.info(f"wrote {args.out} ({len(rows)} rows, {after} filled "
+             f"= {100 * after / max(1, len(rows)):.1f}%, was "
+             f"{100 * before / max(1, len(rows)):.1f}%)")
+    for k, v in stats.changes.most_common():
+        log.info(f"  url_change {k:10s} {v:6d}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point: resolve Institutions, verify, and write the outputs.
 
@@ -297,6 +388,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--refresh-catalogs", action="store_true")
     ap.add_argument("--offline", action="store_true",
                     help="use only the fetch cache; never hit the network")
+    ap.add_argument("--phase", type=int, default=1, choices=(1, 2),
+                    help="1 crawls and matches; 2 runs prior-URL triage and "
+                         "search over an existing result file")
+    ap.add_argument("--results", default="courses_filled.csv",
+                    help="phase 2: the phase 1 output to work from")
+    ap.add_argument("--search-fixture", default=None,
+                    help="phase 2: JSON of canned search results; without a "
+                         "vendor configured, search returns nothing")
     ap.add_argument("--db", default=DEFAULT_DB,
                     help="SQLite file for run state and URL history; "
                          "'' disables the store")
@@ -335,6 +434,9 @@ def main(argv: list[str] | None = None) -> int:
     log_path = setup_logging(run_id, args.log_dir, verbose=args.verbose,
                              quiet=args.dry_run, keep_runs=args.keep_logs)
     log = logging.getLogger("run")
+
+    if args.phase == 2:
+        return run_phase2(args, run_id, log)
 
     rows = load_rows(args.input)
     by_site = group_by_site(rows)

@@ -22,6 +22,9 @@ from patterns.
 | what happens to one row, stage by stage | [docs/WALKTHROUGH.md](./docs/WALKTHROUGH.md) |
 | how to fit the thresholds | [docs/CALIBRATION.md](./docs/CALIBRATION.md) |
 | how the crawler finds listings | the `pipeline/catalog.py` module docstring |
+| what Phase 2 does and what it costs | [docs/PHASE-2.md](./docs/PHASE-2.md) |
+| where a URL came from and what changed | [docs/PROVENANCE.md](./docs/PROVENANCE.md) |
+| why we choose between two URLs with a gate | [docs/adr/0007](./docs/adr/0007-gated-prior-url-adoption.md) |
 | when two courses may share a URL | [docs/adr/0004-bounded-url-sharing.md](./docs/adr/0004-bounded-url-sharing.md) |
 | why results live in SQLite too | [docs/adr/0005-sqlite-for-run-state-and-url-history.md](./docs/adr/0005-sqlite-for-run-state-and-url-history.md) |
 | why crawling is per-site, not per-institution | [docs/adr/0006-the-crawl-unit-is-a-website-not-an-institution.md](./docs/adr/0006-the-crawl-unit-is-a-website-not-an-institution.md) |
@@ -205,6 +208,41 @@ inflate its row count while costing no time.
 `run.py` warns when a chunk no longer matches the current `final_courses.csv`.
 Regenerate chunks with the tool after the sheet changes — never edit a chunk by
 hand.
+
+## Phase 2: triage and search
+
+Phase 1 finished the full sheet at **24,294 of 52,703 rows filled (46.1%)**,
+though only 9.1% are `verified`. Phase 2 works over that result file without
+crawling anything.
+
+```bash
+# Prior-URL triage only. No network, no vendor, no cost.
+python run.py --phase 2 --results courses_filled.csv --out phase2.csv
+```
+
+**Triage** chooses between our URL and the one the source sheet already had,
+using a quality gate rather than either pipeline's confidence label. Fill rises
+**46.1% → 51.0%**. Full reasoning and the measurement behind it:
+[docs/adr/0007](./docs/adr/0007-gated-prior-url-adoption.md).
+
+**Search fallback** is built but **inert until a vendor is configured** — the
+default provider returns nothing, so the stage reports zero results rather than
+failing. About 19,000 rows are genuine search targets, roughly $19 at Serper
+rates. See [docs/PHASE-2.md](./docs/PHASE-2.md).
+
+### The output gains three columns
+
+`prior_course_url`, `prior_matched_status` and `url_change` — because the
+pipeline used to overwrite the sheet's URL and keep no record, silently altering
+**38.4% of rows**. What they mean and how to read them:
+[docs/PROVENANCE.md](./docs/PROVENANCE.md).
+
+**This is a schema change.** The columns are *appended*, so anything reading by
+column name is unaffected — but a consumer reading by column position will
+break.
+
+`matched_status` gains `carried_over`, for a row whose URL came from the sheet
+rather than from extraction.
 
 ## Outputs
 

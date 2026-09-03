@@ -139,9 +139,21 @@ _Avoid_: tag, label, warning
 **Prior URL**:
 A URL an earlier pipeline associated with a Course Row, carried in the input
 sheet. Used as a crawl seed and, once the page has been read for its own
-heading, as a Candidate — never as the answer, and never named after the row
-that claimed it.
+heading, as a Candidate. It may be adopted as the answer when it beats ours,
+but it is never *assumed* to be the answer, and it is always preserved in the
+output rather than overwritten.
 _Avoid_: existing URL, old match, given URL
+
+**Carried Over**:
+A Course Row whose delivered URL came from the source sheet rather than from
+extraction, because ours was absent, dead, or beaten by it.
+_Avoid_: reused, inherited, kept
+
+**Search Candidate**:
+A URL a search provider proposed. It has earned nothing by being proposed: it
+is scored, domain-checked and put through the sharing rule like any other
+Candidate, and can never be reported Verified on a search ranking alone.
+_Avoid_: search result, hit, top result
 
 **Prior Note**:
 An annotation left in `Notes` or `course_url_via_web_search` by an earlier

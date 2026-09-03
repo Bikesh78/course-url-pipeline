@@ -241,6 +241,59 @@ class Store:
         self.conn.commit()
         return changed
 
+    def record_url_rows(self, run_id: str, rows) -> int:
+        """Record final URLs from plain dicts, updating history. Returns drift.
+
+        The dict-shaped counterpart to `record_results`, for phase 2, which
+        works over an output CSV rather than MatchResult objects. Without it
+        phase 2 would seed the sheet's baseline and then never write what it
+        decided, leaving `url_history` with one row per course and drift
+        unanswerable.
+        """
+        from pipeline.catalog import clean_url
+
+        stamp = now_iso()
+        changed = 0
+        for row in rows:
+            # Same canonicalisation as the baseline, so the two are comparable
+            # whatever shape the result file was written in.
+            url = clean_url(row.get("course_url") or "")
+            if not url:
+                continue
+            if self._touch_history_values(
+                    row["id"], url, (row.get("matched_status") or "").strip(),
+                    run_id, stamp):
+                changed += 1
+        self.conn.commit()
+        return changed
+
+    def _touch_history_values(self, course_id: str, url: str, status: str,
+                              run_id: str, stamp: str) -> bool:
+        """Update history for one (course, url). True when the URL changed."""
+        cur = self.conn.execute(
+            "SELECT url FROM url_history WHERE course_id = ? "
+            "ORDER BY last_seen DESC LIMIT 1", (course_id,)).fetchone()
+        previous = cur["url"] if cur else None
+        verified = stamp if status == "verified" else None
+
+        existing = self.conn.execute(
+            "SELECT 1 FROM url_history WHERE course_id = ? AND url = ?",
+            (course_id, url)).fetchone()
+        if existing:
+            self.conn.execute(
+                "UPDATE url_history SET last_seen = ?, status = ?, "
+                "last_run = ?, last_verified = COALESCE(?, last_verified) "
+                "WHERE course_id = ? AND url = ?",
+                (stamp, status, run_id, verified, course_id, url))
+        else:
+            self.conn.execute(
+                "INSERT INTO url_history (course_id, url, first_seen, "
+                "last_seen, last_verified, status, first_run, last_run) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (course_id, url, stamp, stamp, verified, status, run_id,
+                 run_id))
+        return previous is not None and previous != url
+
     def _touch_history(self, result, run_id: str, stamp: str) -> bool:
         """Update history for one row. True when its URL changed.
 
@@ -272,6 +325,50 @@ class Store:
                 (result.row.id, result.url, stamp, stamp, verified,
                  result.status, run_id, run_id))
         return previous is not None and previous != result.url
+
+    # -------------------------------------------------------------- baseline
+    def seed_baseline(self, rows, run_id: str = "source_sheet") -> int:
+        """Enter the source sheet's own URLs as each course's first history row.
+
+        Without this, `url_history` begins at our first run: it held 24,294
+        rows and **zero** courses with more than one URL, so a course whose URL
+        we changed looked as though it had always had ours. Drift was therefore
+        unanswerable for exactly the rows where it mattered.
+
+        Each baseline row is stamped with the sheet's own `processed_date`
+        (2026-06-24, 06-25 or 07-14) rather than "now" — inventing a timestamp
+        would make the history look precise while being wrong about when the
+        URL was actually established.
+
+        Idempotent: a course already carrying this URL is left alone, so
+        re-seeding after a later export does not duplicate rows.
+        """
+        from pipeline.catalog import clean_url
+
+        seeded = 0
+        for row in rows:
+            # Canonicalise exactly as our own URLs are, or a trailing slash
+            # alone reads as the course having moved — the sheet writes
+            # `/x` where extraction writes `/x/`.
+            url = clean_url(row.get("course_url") or "")
+            if not url:
+                continue
+            stamp = (row.get("processed_date") or "").strip() or now_iso()
+            cur = self.conn.execute(
+                "SELECT 1 FROM url_history WHERE course_id = ? AND url = ?",
+                (row["id"], url)).fetchone()
+            if cur:
+                continue
+            self.conn.execute(
+                "INSERT INTO url_history (course_id, url, first_seen, "
+                "last_seen, last_verified, status, first_run, last_run) "
+                "VALUES (?, ?, ?, ?, NULL, ?, ?, ?)",
+                (row["id"], url, stamp, stamp,
+                 (row.get("matched_status") or "").strip() or None,
+                 run_id, run_id))
+            seeded += 1
+        self.conn.commit()
+        return seeded
 
     # ---------------------------------------------------------------- queries
     def history_for(self, course_id: str) -> list[sqlite3.Row]:

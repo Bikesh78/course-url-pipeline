@@ -9,8 +9,10 @@ from pipeline.load import CourseRow
 from pipeline.match import MatchResult
 from pipeline.store import Store, new_run_id
 
-DS = "https://courses.aber.ac.uk/undergraduate/data-science/"
-DS_NEW = "https://courses.aber.ac.uk/undergraduate/data-science-bsc/"
+# Canonical form: clean_url() strips the trailing slash, and the store
+# canonicalises before writing history so a slash is not read as a move.
+DS = "https://courses.aber.ac.uk/undergraduate/data-science"
+DS_NEW = "https://courses.aber.ac.uk/undergraduate/data-science-bsc"
 
 
 def result(course_id="1", url=DS, status="verified", score=1.0):
@@ -164,6 +166,88 @@ class TestUrlHistory(StoreCase):
         self.store.start_run(r2, "x.csv", {})
         self.store.record_results(r2, [result(status="verified")])
         self.assertIsNotNone(self.store.history_for("1")[0]["last_verified"])
+
+
+class TestBaselineSeeding(StoreCase):
+    """The sheet's own URLs are each course's first history entry.
+
+    Without this, history began at our first run: 24,294 rows and zero courses
+    with more than one URL, so a course whose URL we changed looked as though
+    it had always had ours.
+    """
+
+    def _sheet(self, url=DS, date="2026-06-24"):
+        return [{"id": "1", "course_url": url, "processed_date": date,
+                 "matched_status": "matched"}]
+
+    def test_a_sheet_url_becomes_the_first_history_row(self):
+        self.assertEqual(self.store.seed_baseline(self._sheet()), 1)
+        hist = self.store.history_for("1")
+        self.assertEqual(len(hist), 1)
+        self.assertEqual(hist[0]["url"], DS)
+
+    def test_it_is_stamped_with_the_sheets_own_date(self):
+        # Inventing "now" would make the history look precise but be wrong
+        # about when the URL was established.
+        self.store.seed_baseline(self._sheet(date="2026-07-14"))
+        self.assertTrue(
+            self.store.history_for("1")[0]["first_seen"].startswith("2026-07-14"))
+
+    def test_seeding_twice_does_not_duplicate(self):
+        self.store.seed_baseline(self._sheet())
+        self.assertEqual(self.store.seed_baseline(self._sheet()), 0)
+        self.assertEqual(len(self.store.history_for("1")), 1)
+
+    def test_a_blank_sheet_url_seeds_nothing(self):
+        self.assertEqual(self.store.seed_baseline(
+            [{"id": "1", "course_url": "", "processed_date": "2026-06-24"}]), 0)
+
+    def test_the_baseline_is_canonicalised(self):
+        """A trailing slash alone must not read as the course having moved."""
+        self.store.seed_baseline(self._sheet(url=DS + "/"))
+        self.assertEqual(self.store.history_for("1")[0]["url"], DS)
+
+
+class TestDictHistoryPath(StoreCase):
+    """Phase 2 works over CSV rows, not MatchResult objects."""
+
+    def test_a_changed_url_is_recorded_as_drift(self):
+        rid = new_run_id()
+        self.store.start_run(rid, "x.csv", {})
+        self.store.seed_baseline(
+            [{"id": "1", "course_url": DS, "processed_date": "2026-06-24"}])
+        changed = self.store.record_url_rows(
+            rid, [{"id": "1", "course_url": DS_NEW,
+                   "matched_status": "verified"}])
+        self.assertEqual(changed, 1)
+        self.assertEqual([h["url"] for h in self.store.history_for("1")],
+                         [DS, DS_NEW])
+
+    def test_an_unchanged_url_is_not_drift(self):
+        rid = new_run_id()
+        self.store.start_run(rid, "x.csv", {})
+        self.store.seed_baseline(
+            [{"id": "1", "course_url": DS, "processed_date": "2026-06-24"}])
+        self.assertEqual(self.store.record_url_rows(
+            rid, [{"id": "1", "course_url": DS,
+                   "matched_status": "verified"}]), 0)
+
+    def test_a_trailing_slash_is_not_drift(self):
+        rid = new_run_id()
+        self.store.start_run(rid, "x.csv", {})
+        self.store.seed_baseline(
+            [{"id": "1", "course_url": DS, "processed_date": "2026-06-24"}])
+        self.assertEqual(self.store.record_url_rows(
+            rid, [{"id": "1", "course_url": DS + "/",
+                   "matched_status": "verified"}]), 0)
+
+    def test_blank_rows_are_skipped(self):
+        rid = new_run_id()
+        self.store.start_run(rid, "x.csv", {})
+        self.assertEqual(self.store.record_url_rows(
+            rid, [{"id": "1", "course_url": "", "matched_status": "no_match"}]),
+            0)
+        self.assertEqual(self.store.history_for("1"), [])
 
 
 class TestResultPersistence(StoreCase):

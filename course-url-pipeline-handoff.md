@@ -130,6 +130,29 @@ Chunking does **not** reduce total Phase 1 time. It exists so a complete
 vertical slice (Phase 1 -> Phase 2 -> adjudication) can be proven on part of the
 sheet before Phase 2 spends money on all 52,781 rows.
 
+## Phase 2
+
+`python run.py --phase 2 --results courses_filled.csv --out phase2.csv`
+
+Two independent stages over an existing Phase 1 result file; neither crawls.
+
+**Triage** decides between our URL and the sheet's, using a quality gate (URL
+slug vs course name, our 0.55 floor) rather than either pipeline's confidence
+label. Fill **46.1% -> 51.0%**. See `docs/adr/0007-gated-prior-url-adoption.md`
+for the measurement, including the fact that an earlier rule drawn from 32
+samples was wrong in four of its six cells when re-measured against 9,388.
+
+**Search** is built and tested but **inert**: no vendor is configured, so
+`NullProvider` returns nothing and the stage reports zero results rather than
+failing. ~19,000 genuine targets, about $19 at Serper rates. `FixtureProvider`
+proves the wiring offline.
+
+**Provenance** columns (`prior_course_url`, `prior_matched_status`,
+`url_change`) are appended to the output, and the sheet's URLs are seeded into
+`url_history` stamped with their own `processed_date`. 8,328 courses now hold a
+different URL than the sheet delivered — a number the CSV and the database
+compute independently and agree on. See `docs/PROVENANCE.md`.
+
 ## Gotchas that are not obvious from the code
 
 - **Chunk files go stale silently if you let them.** `chunks/manifest.json`
@@ -138,6 +161,16 @@ sheet before Phase 2 spends money on all 52,781 rows.
 - **Equal-row chunks are not equal-time chunks.** Wall-clock tracks Site count,
   not rows: at 20 chunks the spread is ~1-27 minutes, and one chunk is a single
   5,083-row Site.
+- **`clean_url` is the single definition of URL identity.** It strips trailing
+  slashes, fragments, tracking and view parameters, and surrounding whitespace.
+  Anything comparing two URLs must go through it: 729 rows once reported a
+  changed URL over a trailing slash, and 18 held a URL ending in a space
+  scraped from an anchor.
+- **Adoption of a prior URL must pass the sharing rule.** 1,949 were refused
+  because the sheet had filed one page against several unrelated courses. Skip
+  that check and Phase 2 imports the collapse ADR-0004 prevents.
+- **A rule measured on one chunk is not a rule.** The first triage rule came
+  from 32 disagreements and was wrong in four of six cells at full scale.
 - **After changing anything in `pipeline/catalog.py`, pass
   `--refresh-catalogs`.** Otherwise stale `catalogs/*.json` are reused and your
   change appears to do nothing. `SCHEMA_VERSION` in `catalog.py` only forces a

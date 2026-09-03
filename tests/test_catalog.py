@@ -13,7 +13,9 @@ from pipeline.catalog import (
     looks_like_course_name, page_heading, page_title, url_specificity,
 )
 
-ANTH = "https://courses.aber.ac.uk/undergraduate/anthropology/"
+# Canonical form: clean_url() strips the trailing slash, so a fixture keyed
+# with one would never be found.
+ANTH = "https://courses.aber.ac.uk/undergraduate/anthropology"
 
 # Observed seeds for this shape: the university's own course page (which
 # refuses) and its International College (which works).
@@ -195,7 +197,7 @@ class TestUrlHandling(unittest.TestCase):
     def test_drops_fragment_and_tracking(self):
         self.assertEqual(
             clean_url("https://a.ac.uk/courses/x/?utm_source=q&page=2#top"),
-            "https://a.ac.uk/courses/x/?page=2")
+            "https://a.ac.uk/courses/x?page=2")
 
     def test_drops_view_selecting_query_params(self):
         # The same course linked as ?term=2026-27 and ?term=2027-28 must
@@ -203,11 +205,32 @@ class TestUrlHandling(unittest.TestCase):
         a = clean_url("https://a.ac.uk/course-structure/ug/x/?term=2026-27")
         b = clean_url("https://a.ac.uk/course-structure/ug/x/?term=2027-28")
         self.assertEqual(a, b)
-        self.assertEqual(a, "https://a.ac.uk/course-structure/ug/x/")
+        self.assertEqual(a, "https://a.ac.uk/course-structure/ug/x")
 
     def test_keeps_identifying_query_params(self):
         self.assertIn("courseId=123",
                       clean_url("https://a.ac.uk/courses/?courseId=123"))
+
+    def test_trailing_slash_does_not_make_a_second_url(self):
+        """`/x` and `/x/` are one page, and were two Candidates.
+
+        729 rows in the full sheet reported a changed URL when only the slash
+        differed, and a Share Group could hold the same page twice.
+        """
+        self.assertEqual(clean_url("https://a.ac.uk/courses/x"),
+                         clean_url("https://a.ac.uk/courses/x/"))
+
+    def test_the_root_path_keeps_its_slash(self):
+        # Stripping it would yield a bare host rather than a path.
+        self.assertEqual(clean_url("https://a.ac.uk/"), "https://a.ac.uk/")
+        self.assertEqual(clean_url("https://a.ac.uk"), "https://a.ac.uk/")
+
+    def test_strips_whitespace_from_hrefs(self):
+        """Real anchors carry stray whitespace; it reached the output."""
+        self.assertEqual(clean_url("https://a.ac.uk/x "),
+                         clean_url("https://a.ac.uk/x"))
+        self.assertEqual(clean_url("  https://a.ac.uk/x  "),
+                         "https://a.ac.uk/x")
 
     def test_rejects_non_http(self):
         self.assertEqual(clean_url("mailto:a@b.c"), "")
