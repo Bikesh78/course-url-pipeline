@@ -340,6 +340,81 @@ class TestDomainInterleaving(unittest.TestCase):
         self.assertEqual(len(order), 5)
 
 
+class TestPhase1Provenance(unittest.TestCase):
+    """Phase 1's own output must show what it did to the sheet's URL.
+
+    Without this the file silently altered 38.4% of rows and the only way to
+    see it was to join back to the source sheet.
+    """
+
+    def _write(self, results):
+        from pipeline.report import write_filled_csv
+        import csv as _csv
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "o.csv")
+            write_filled_csv(results, path)
+            with open(path, encoding="utf-8") as fh:
+                return list(_csv.DictReader(fh))
+
+    def _res(self, rid, name, url=None, prior="", prior_status="",
+             status="no_match"):
+        row = CourseRow(rid, name, ABER, "https://a", prior_course_url=prior,
+                        raw={"matched_status": prior_status})
+        cand = Candidate(name, url, "ug") if url else None
+        return MatchResult(row=row, candidate=cand,
+                           score=1.0 if cand else 0.0, status=status)
+
+    def test_the_columns_are_present(self):
+        got = self._write([self._res("1", "Data Science BSc", DS)])
+        for c in ("prior_course_url", "prior_matched_status", "url_change"):
+            self.assertIn(c, got[0])
+
+    def test_a_replaced_url_reads_changed_and_keeps_the_prior(self):
+        got = self._write([self._res("1", "Data Science BSc", DS,
+                                     prior="https://a/old", 
+                                     prior_status="matched")])
+        self.assertEqual(got[0]["url_change"], "changed")
+        self.assertEqual(got[0]["prior_course_url"], "https://a/old")
+        self.assertEqual(got[0]["prior_matched_status"], "matched")
+
+    def test_a_row_we_could_not_fill_reads_dropped(self):
+        got = self._write([self._res("1", "X BSc", None,
+                                     prior="https://a/old",
+                                     prior_status="matched")])
+        self.assertEqual(got[0]["url_change"], "dropped")
+
+    def test_a_row_the_sheet_never_had_reads_added(self):
+        got = self._write([self._res("1", "X BSc", DS)])
+        self.assertEqual(got[0]["url_change"], "added")
+
+    def test_provenance_columns_are_appended_not_inserted(self):
+        """Reading by name stays safe; reading by position is at least honest."""
+        from pipeline.report import OUTPUT_COLUMNS, PROVENANCE_COLUMNS
+        self.assertEqual(OUTPUT_COLUMNS[-3:], PROVENANCE_COLUMNS)
+
+
+class TestReviewQueueShowsEveryCandidate(unittest.TestCase):
+    def test_the_reviewer_sees_the_sheets_url_too(self):
+        """On `ambiguous` rows a `matched` prior beat us 1,613 to 498."""
+        from pipeline.report import write_review_queue
+        import csv as _csv
+        r = MatchResult(
+            row=CourseRow("1", "Anthropology BA (Hons)", ABER, "https://a",
+                          prior_course_url="https://a/anthropology",
+                          raw={"matched_status": "matched"}),
+            candidate=Candidate("Short courses", "https://a/category/short",
+                                "ug"),
+            score=0.71, margin=0.02, status="ambiguous")
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "q.csv")
+            write_review_queue([r], path)
+            with open(path, encoding="utf-8") as fh:
+                got = next(_csv.DictReader(fh))
+        self.assertEqual(got["prior_course_url"], "https://a/anthropology")
+        self.assertEqual(got["prior_matched_status"], "matched")
+        self.assertEqual(got["url_change"], "changed")
+
+
 class TestRateLimitGrouping(unittest.TestCase):
     def test_course_subdomain_shares_the_apex_budget(self):
         # Both must map to one key, or the crawler doubles its request rate

@@ -230,12 +230,18 @@ default provider returns nothing, so the stage reports zero results rather than
 failing. About 19,000 rows are genuine search targets, roughly $19 at Serper
 rates. See [docs/PHASE-2.md](./docs/PHASE-2.md).
 
-### The output gains three columns
+### The outputs gain three columns
 
 `prior_course_url`, `prior_matched_status` and `url_change` — because the
 pipeline used to overwrite the sheet's URL and keep no record, silently altering
-**38.4% of rows**. What they mean and how to read them:
+**38.4% of rows**. They appear in `courses_filled.csv`, `review_queue.csv` and
+the Phase 2 output alike, so the sheet's URL is visible wherever a decision is
+being read or made. What they mean and how to read them:
 [docs/PROVENANCE.md](./docs/PROVENANCE.md).
+
+`url_change` describes *that file's own* answer against the sheet, so a row may
+read `dropped` in `courses_filled.csv` and `unchanged` after Phase 2 restored
+it. Both are correct for the file they are in.
 
 **This is a schema change.** The columns are *appended*, so anything reading by
 column name is unaffected — but a consumer reading by column position will

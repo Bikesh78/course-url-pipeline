@@ -9,15 +9,30 @@ from collections import Counter, defaultdict
 
 from pipeline.load import INPUT_COLUMNS
 from pipeline.match import MatchResult
+from pipeline.triage import classify_change
+
+# Provenance columns are appended, never inserted: a consumer reading by name
+# is unaffected, and one reading by position is at least not silently shifted.
+# `url_change` here describes *this file's* answer against the sheet. Phase 2
+# recomputes it after triage, so the same column can legitimately differ
+# between courses_filled.csv and the phase 2 output — each file describes what
+# it delivered. See docs/PROVENANCE.md.
+PROVENANCE_COLUMNS = ["prior_course_url", "prior_matched_status", "url_change"]
 
 OUTPUT_COLUMNS = INPUT_COLUMNS + ["match_margin", "live_page_score",
-                                  "match_evidence", "row_flags"]
+                                  "match_evidence", "row_flags"] + \
+    PROVENANCE_COLUMNS
 
+# The reviewer is choosing between candidates, so every candidate belongs here.
+# The sheet's own URL is frequently the best of them — on `ambiguous` rows a
+# `matched` prior beat our result 1,613 times to 498 — and it was previously
+# absent, leaving the reviewer comparing our match against only its runner-up.
 REVIEW_COLUMNS = [
     "id", "institution_name", "name", "matched_status", "matched_score",
     "match_margin", "course_url", "matched_candidate_name",
-    "runner_up_score", "runner_up_url", "runner_up_name", "row_flags",
-    "prior_note",
+    "runner_up_score", "runner_up_url", "runner_up_name",
+    "prior_course_url", "prior_matched_status", "url_change",
+    "row_flags", "prior_note",
 ]
 
 
@@ -30,8 +45,13 @@ def write_filled_csv(results: list[MatchResult], path: str) -> None:
     """Write `courses_filled.csv`: every input row, plus the decision columns.
 
     Every Course Row appears exactly once whether or not it got a URL, so the
-    output can be joined back to the input on `id` without a lookup miss.
-    `processed_courses.csv` itself is never touched.
+    output can be joined back to the input on `id` without a lookup miss. The
+    input sheet itself is never touched.
+
+    The sheet's own URL is preserved alongside ours rather than overwritten.
+    Without that, this file silently altered 38.4% of rows — 8,241 dropped and
+    8,328 changed, 334 of them replacing a working URL with one that 404s — and
+    the only way to see it was to join back to the source sheet.
     """
     with open(path, "w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh)
@@ -50,6 +70,9 @@ def write_filled_csv(results: list[MatchResult], path: str) -> None:
                 f"{res.live_score:.4f}" if res.live_score is not None else "",
                 res.evidence,
                 ";".join(row.flags + res.flags),
+                row.prior_course_url,
+                (row.raw.get("matched_status") or "").strip(),
+                classify_change(row.prior_course_url, res.url),
             ])
 
 
@@ -68,6 +91,9 @@ def write_review_queue(results: list[MatchResult], path: str) -> None:
                 f"{r.runner_up_score:.4f}" if r.runner_up else "",
                 r.runner_up.url if r.runner_up else "",
                 r.runner_up.name if r.runner_up else "",
+                r.row.prior_course_url,
+                (r.row.raw.get("matched_status") or "").strip(),
+                classify_change(r.row.prior_course_url, r.url),
                 ";".join(r.row.flags + r.flags),
                 r.row.notes or r.row.prior_web_search,
             ])

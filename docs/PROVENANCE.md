@@ -42,6 +42,19 @@ changes.** `/courses/x` and `/courses/x/` are one page. Before that was fixed,
 reads `unchanged` rather than `dropped`. The column describes what you actually
 received, not an intermediate state the pipeline passed through.
 
+## Which files carry these columns
+
+**Both.** `courses_filled.csv` (Phase 1) and the Phase 2 output each carry all
+three, and `review_queue.csv` carries them too — a reviewer choosing between our
+match and its runner-up should see the sheet's URL as well, since on `ambiguous`
+rows a `matched` prior beat our result 1,613 times to 498.
+
+`url_change` describes **that file's own answer** against the sheet. Phase 2
+recomputes it after triage, so a row can legitimately read `dropped` in
+`courses_filled.csv` and `unchanged` in the Phase 2 output — Phase 1 found
+nothing, and triage then restored the sheet's URL. Each file is telling the
+truth about what it delivered; neither is stale.
+
 ## The companion columns
 
 - `prior_course_url` — the sheet's URL, verbatim, never overwritten
