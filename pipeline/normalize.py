@@ -131,12 +131,26 @@ _UNDERGRAD_CLASSES = {"bachelor", "foundation", "integrated_masters",
                       "vet_certificate", "diploma", "adv_diploma"}
 _POSTGRAD_CLASSES = {"masters", "doctorate", "pgcert"}
 
+# Australian VET codes are eight characters, so the generic rule below (which
+# stops at seven) let them through as content. They come in two shapes and both
+# occur in this dataset: training-package codes are letters-then-digits
+# (BSB50420, SIT50422, CHC33021) while state- and nationally-accredited courses
+# reverse it (22627VIC, 10991NAT). Matching them exactly rather than widening
+# the length bound is deliberate: raising the generic cap to nine also swept in
+# long alphanumeric tokens that were genuine content. Measured over every
+# 8-character digit-bearing token in the sheet, this pattern covers 6917 of
+# 6945 occurrences, and what it leaves behind ("r1160520", "bsbb0120") is noise
+# of no fixed shape.
+_VET_CODE = re.compile(r"^(?:[a-z]{3}\d{5}|\d{5}[a-z]{3})$", re.IGNORECASE)
+
 # UCAS / provider course codes. Real examples from this dataset: 7G73, Q300,
 # 142L, C801, D406D, 198L. Their shapes vary too much for one regex, so a code
 # is identified by character composition instead: a short alphanumeric token
 # carrying at least two digits. Two digits is the threshold that keeps genuine
 # content ("Year 11", "3D Animation", "Level 5") while dropping codes.
 def _is_course_code(token: str) -> bool:
+    if _VET_CODE.match(token):
+        return True
     if not (3 <= len(token) <= 7) or not token.isalnum():
         return False
     return sum(c.isdigit() for c in token) >= 2

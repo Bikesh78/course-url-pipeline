@@ -39,6 +39,36 @@ URLs; `score_all()` in `pipeline/match.py` multiplies its result by
 `url_specificity()` from `pipeline/catalog.py`. **The number `score()` returns
 is not the number used.**
 
+### Course codes are noise, and the shapes vary
+
+The first box in the diagram strips provider course codes. They almost always
+appear on the *site's* side of the comparison and not in the sheet's course
+name, so an unstripped code is pure noise dragging a correct match down.
+
+Two families, recognised two different ways:
+
+| family | examples | how it is recognised |
+|---|---|---|
+| UCAS / provider codes | `7G73`, `Q300`, `142L`, `C801`, `D406D` | shape varies too much for a regex: any alphanumeric token of 3–7 characters carrying at least two digits |
+| Australian VET codes | `BSB50420`, `SIT50422`, `CHC33021` — and reversed, `22627VIC`, `10991NAT` | matched exactly, `[a-z]{3}\d{5}` or `\d{5}[a-z]{3}` |
+
+The VET codes are eight characters, so the generic rule (which stops at seven)
+let them straight through. On the finished sheet 2,900 rows carried one on one
+side only, and **924 of them sat below the confident threshold purely because
+of it**:
+
+```
+Diploma of Leadership and Management
+  vs "BSB50420 Diploma of Leadership and Management"     0.776  ->  1.000
+```
+
+Matching the shape rather than widening the length bound is deliberate. Raising
+the generic cap to nine characters also swept in long alphanumeric tokens that
+were genuine content — 22 rows scored worse. The two patterns cover 6,917 of
+the 6,945 eight-character digit-bearing tokens in the sheet, and what they
+leave behind (`r1160520`, `bsbb0120`) is noise of no fixed shape.
+
+
 ## Worked arithmetic
 
 Real pairs, real numbers, recomputed from the current code.
@@ -199,6 +229,12 @@ claim.
 - **A perfect Score is not a confident match.** 1.000 against two Candidates is
   an unresolved choice; that is exactly what Margin exists to express, and why
   the two numbers are never multiplied together.
+- **One page under two URLs still reads as two Candidates.** A site that serves
+  the same page at `/course/17738` and `/course/17738/diploma-of-nursing` gives
+  both the same name and the same Score, so the Margin is zero and the row is
+  `ambiguous`. Candidate identity was aligned across *names* (see the Catalog
+  stage of the walkthrough) but not across URL spellings, which extraction
+  cannot detect without fetching both. Roughly 1% of rows in a spot check.
 
 ---
 

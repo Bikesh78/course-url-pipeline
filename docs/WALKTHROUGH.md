@@ -65,6 +65,15 @@ Normalisation strips course codes, `(Hons)`, durations and stopwords. The Award 
 
 `find_seeds()` does not know where an Institution keeps its courses, so it probes 16 hub paths and 7 course subdomains and keeps whatever answers 200 — recording the URL *after* redirects.
 
+Answering 200 is necessary but not sufficient. Two kinds of response are turned away even though the server called them successful:
+
+- **A sign-in wall.** `catalogue.abertay.ac.uk/mng/login` answers 200 and yields nothing.
+- **A soft 404** — a page that says "Page not Found" while the server says 200. Lambton College served one for six separate hub probes, and its Catalog still filled with 1,295 Candidates scraped off that error page's own navigation. Across the full run, 339 of 8,158 HTTP-200 seeds (4.2%, over 36 sites) were these; Lambton alone dropped from 14 seeds to 2 once they were rejected.
+
+A soft 404 is also **counted as the 404 it is** in the histogram below. Otherwise a site whose every hub path serves an error page still shows 200s to `classify_probes()`, and is filed under a symptom no amount of crawling can fix rather than as `no_hub`.
+
+The signature is read from the `<title>` and the headings, never from body prose — a real listing page can say "if you get a page not found error, contact us" and must not be thrown away for it.
+
 | hub probe status | count |
 |---|---|
 | 200 | 4 |
@@ -87,7 +96,9 @@ Notes recorded:
 
 ## Stage 3 — Catalog
 
-Candidates are **extracted** from the Institution's own listing pages, never generated (ADR-0001). Each is a `(name, url, level, source)` record whose identity is its URL.
+Candidates are **extracted** from the Institution's own listing pages, never generated (ADR-0001). Each is a `(name, url, level, source)` record whose identity is its URL **plus its Variant Stem** — one page can list several courses, so one URL may legitimately be several Candidates (ADR-0004).
+
+Because the stem is taken from the name, the Institution's own name is removed from every Candidate before it is keyed. A site prints one page as "Student Support" in one listing and "Student Support | Webster University" in another; keyed on the raw text those became two Candidates for one page, both scoring identically against a Course Row, leaving a Margin of zero and a row filed `ambiguous` with nothing to choose between. `score()` already stripped the Institution before comparing, so this changes no Score — it aligns *identity* with what scoring was doing all along. On the finished sheet, 494 rows carried an Institution word their course name lacked and exactly one of them reached `verified`, against a 19.7% baseline.
 
 | field | value |
 |---|---|

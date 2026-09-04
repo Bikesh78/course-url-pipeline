@@ -7,10 +7,12 @@ import pipeline.catalog as catalog_module
 from pipeline.fetch import FetchResult
 from pipeline.catalog import (
     build_catalog,
-    SCHEMA_VERSION, Candidate, Catalog, _AUTH_PATH, _slug_to_name,
+    HUB_PATHS, SCHEMA_VERSION, Candidate, Catalog, _AUTH_PATH,
+    _drop_institution_names, _slug_to_name,
     classify_probes, clean_url, extract_links, host_is_refusing,
     level_from_url,
-    looks_like_course_name, page_heading, page_title, url_specificity,
+    looks_like_course_name, looks_like_soft_404, page_heading, page_title,
+    url_specificity,
 )
 
 # Canonical form: clean_url() strips the trailing slash, so a fixture keyed
@@ -588,3 +590,115 @@ class TestExtractionHealth(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCandidateIdentityIgnoresInstitution(unittest.TestCase):
+    """One page must be one Candidate, however the site spelled its name.
+
+    A Candidate's identity is (URL, Variant Stem), and the stem was taken from
+    the raw anchor text. So a site that prints the same page as "Student
+    Support" in one listing and "Student Support | Webster University" in
+    another produced two Candidates for one page. Both then score identically
+    against a Course Row, the Margin between them is zero, and the row is filed
+    `ambiguous` with nothing to choose between. On the finished sheet, 494 rows
+    carried an Institution word their course name lacked and exactly one
+    reached `verified`, against a 19.7% baseline.
+    """
+
+    def test_two_spellings_of_one_page_collapse(self):
+        got = _drop_institution_names([
+            Candidate("Bachelor of Animal and Veterinary Bioscience", ANTH),
+            Candidate("Bachelor of Animal and Veterinary Bioscience "
+                      "- The University of Sydney", ANTH),
+        ], "The University of Sydney")
+        self.assertEqual(len(got), 1)
+        self.assertNotIn("sydney", got[0].name.lower())
+
+    def test_distinct_courses_on_one_page_still_survive(self):
+        # The whole point of ADR-0004: a shared page holds several courses, and
+        # collapsing on the URL alone would discard all but one. Stripping the
+        # Institution must not widen that collapse. (Variant Siblings --
+        # "Anthropology" and "Anthropology with Placement" -- do share a
+        # Variant Stem and so are one Candidate by design, before and after
+        # this change; distinct subjects are the case that must survive.)
+        got = _drop_institution_names([
+            Candidate("Anthropology - University of Sydney", ANTH),
+            Candidate("Archaeology - University of Sydney", ANTH),
+        ], "University of Sydney")
+        self.assertEqual(len(got), 2)
+
+    def test_a_name_that_is_only_the_institution_is_kept_as_found(self):
+        # strip_institution can leave nothing; dropping the name entirely would
+        # make the Candidate unscoreable rather than merely unhelpful.
+        got = _drop_institution_names(
+            [Candidate("Webster University", ANTH)], "Webster University")
+        self.assertEqual(got[0].name, "Webster University")
+
+    def test_build_catalog_applies_it(self):
+        # The health checks along the ladder count Candidates, so the collapse
+        # has to happen as they enter -- not once at the end.
+        listing = (
+            f'<a href="{ANTH}">Anthropology BA | Aberystwyth University</a>'
+            f'<a href="{ANTH}">Anthropology BA</a>')
+        f = _PageFetcher({"https://www.aber.ac.uk/courses": (200, listing)})
+        cat = build_catalog(f, "Aberystwyth University",
+                            "https://www.aber.ac.uk", expected_rows=1)
+        urls = [c for c in cat.candidates if c.url == ANTH]
+        self.assertEqual(len(urls), 1, [c.name for c in cat.candidates])
+
+
+class TestSoft404Seeds(unittest.TestCase):
+    """A 200 that says "page not found" is not a listing.
+
+    Lambton College answers 200 with "Error - Page not Found | Lambton
+    College" for six separate hub probes, and its Catalog still filled with
+    1,295 Candidates scraped off that error page's own navigation. Across the
+    finished run, 339 of 8,158 HTTP-200 seeds (4.2%, over 36 sites) were these.
+    """
+
+    def test_title_signature_is_detected(self):
+        for html in (
+            "<title>Error - Page not Found | Lambton College</title>",
+            "<title>Page Not Found</title>",
+            "<html><body><h1>404 Error</h1></body></html>",
+            "<title>Oops</title><h1>The page you requested does not exist</h1>",
+        ):
+            with self.subTest(html=html[:40]):
+                self.assertTrue(looks_like_soft_404(html))
+
+    def test_a_listing_that_merely_mentions_the_phrase_is_kept(self):
+        # Read from the title and headings, never the body prose: a real
+        # listing can mention it in passing and must not be thrown away.
+        self.assertFalse(looks_like_soft_404(
+            "<title>Undergraduate Courses</title><body>Browse our courses. "
+            "If you get a page not found error, contact us.</body>"))
+        self.assertFalse(looks_like_soft_404(
+            "<title>Courses | Lambton College</title><h1>Programs</h1>"))
+
+    def test_soft_404_is_not_accepted_as_a_seed(self):
+        err = "<title>Error - Page not Found | Lambton College</title><nav>" \
+              '<a href="/programs/nursing">Nursing</a></nav>'
+        pages = {f"https://www.lambton.ca{p}": (200, err) for p in HUB_PATHS}
+        f = _PageFetcher(pages)
+        seeds, notes, statuses = catalog_module.find_seeds(
+            f, "https://www.lambton.ca")
+        self.assertEqual(seeds, [])
+        self.assertTrue(any("soft 404" in n for n in notes), notes)
+
+    def test_a_site_of_soft_404s_is_no_hub_not_responded(self):
+        # The status histogram must record the 404 it is, not the 200 it
+        # claims, or the site is filed under a symptom no crawling can fix.
+        err = "<title>Page not found</title>"
+        pages = {f"https://www.lambton.ca{p}": (200, err) for p in HUB_PATHS}
+        _, _, statuses = catalog_module.find_seeds(
+            _PageFetcher(pages), "https://www.lambton.ca")
+        self.assertNotIn(200, statuses)
+        self.assertEqual(classify_probes(statuses), "no_hub")
+
+    def test_a_real_listing_still_becomes_a_seed(self):
+        ok = '<title>Courses</title><a href="/programs/nursing">Nursing</a>'
+        f = _PageFetcher({"https://www.lambton.ca/courses": (200, ok)})
+        seeds, _, statuses = catalog_module.find_seeds(
+            f, "https://www.lambton.ca")
+        self.assertEqual(seeds, ["https://www.lambton.ca/courses"])
+        self.assertEqual(statuses.get(200), 1)

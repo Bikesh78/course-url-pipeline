@@ -7,8 +7,8 @@ planning; see ADR-0001. If these regress, the pipeline is unsafe to run.
 import unittest
 
 from pipeline.normalize import (
-    award_classes, award_tokens, level_of, normalize_name, score,
-    strip_institution,
+    _is_course_code, award_classes, award_tokens, level_of, normalize_name,
+    score, strip_institution,
 )
 
 ABER = "Aberystwyth University"
@@ -177,3 +177,49 @@ class TestDegenerateInput(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestVetCodes(unittest.TestCase):
+    """Australian VET codes are eight characters and must read as codes.
+
+    The generic code test stops at seven, so `7G73` was stripped as noise and
+    `BSB50420` survived into the comparison. It appears on the site's side of
+    the match and not in the sheet's course name, so it acted as pure noise:
+    across the finished sheet, 2,900 rows carried one on one side only and 924
+    of them sat below the confident threshold purely because of it.
+    """
+
+    def test_training_package_code_is_stripped(self):
+        # Two spellings of one course. Before this, 0.776 -- just under the
+        # 0.80 confident threshold, so the row was filed `probable`.
+        self.assertEqual(
+            score("Diploma of Leadership and Management",
+                  "BSB50420 Diploma of Leadership and Management", "TAFE NSW"),
+            1.0)
+
+    def test_both_code_shapes_are_recognised(self):
+        for code in ("BSB50420", "SIT50422", "CHC33021", "AUR50216"):
+            with self.subTest(code=code):
+                self.assertNotIn(code.lower(),
+                                 normalize_name(f"{code} Diploma of Nursing"))
+        # State- and nationally-accredited courses reverse the shape. Covering
+        # only letters-then-digits reached 98.7% of observed codes; these are
+        # the rest.
+        for code in ("22627VIC", "10991NAT", "22603VIC"):
+            with self.subTest(code=code):
+                self.assertNotIn(code.lower(),
+                                 normalize_name(f"{code} Course in Bricklaying"))
+
+    def test_content_that_merely_looks_like_a_code_survives(self):
+        # Widening the length bound instead of matching the shape swept these
+        # in. "r1160520" and "bsbb0120" are typos in the sheet, not codes.
+        for token in ("r1160520", "bsbb0120", "10299173", "3d", "year"):
+            with self.subTest(token=token):
+                self.assertFalse(_is_course_code(token))
+
+    def test_a_code_alone_does_not_make_two_courses_match(self):
+        # Stripping the code must not erase the distinction between courses.
+        self.assertLess(
+            score("Diploma of Nursing",
+                  "BSB50420 Diploma of Leadership and Management", "TAFE NSW"),
+            0.55)

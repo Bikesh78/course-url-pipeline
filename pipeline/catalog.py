@@ -65,10 +65,11 @@ import json
 import logging
 import re
 import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
-from pipeline.fetch import Fetcher, registrable
-from pipeline.normalize import level_of, normalize_name, variant_stem
+from pipeline.fetch import FetchResult, Fetcher, registrable
+from pipeline.normalize import (level_of, normalize_name,
+                               strip_institution, variant_stem)
 
 log = logging.getLogger(__name__)
 
@@ -168,6 +169,43 @@ SCHEMA_VERSION = 3
 # `catalogue.abertay.ac.uk/mng/login`, which answered 200 and yielded nothing.
 _AUTH_PATH = re.compile(r"/(?:login|signin|sign-in|auth|account|logon)(?:/|$)",
                         re.IGNORECASE)
+
+# A "soft 404": the page says it does not exist while the server says 200.
+# Lambton College answers 200 with "Error - Page not Found | Lambton College"
+# for six separate hub probes, and its Catalog still filled with 1,295
+# Candidates scraped off that error page's own navigation. Measured across the
+# finished run, 339 of 8,158 HTTP-200 seeds (4.2%, over 36 sites) were these.
+# The phrases a site actually uses vary, so this covers the observed families
+# rather than one wording; where it is read from is what keeps it precise --
+# see `looks_like_soft_404`.
+_SOFT_404 = re.compile(
+    r"\b(?:page|file|document)\s+not\s+found\b"
+    r"|\berror\s*[:\-]?\s*40[34]\b"
+    r"|\b40[34]\b\s*[:\-–|]?\s*(?:error|not\s+found|page)"
+    r"|\bpage\s+(?:you\s+(?:\w+\s+){0,3})?(?:cannot|can\s?not|can'?t)\s+be\s+found\b"
+    r"|\bpage\s+(?:you\s+(?:\w+\s+){0,3})?(?:does\s+not|doesn'?t)\s+exist\b"
+    r"|\b(?:we|you)\s+(?:cannot|can\s?not|can'?t)\s+find\s+(?:that|the|this)\s+page\b"
+    r"|\bnot\s+found\s*[|\-–]",
+    re.IGNORECASE)
+
+
+def looks_like_soft_404(html: str) -> bool:
+    """True when a 200 response is really a not-found page. Pure; no network.
+
+    Reads the <title> and the headings only, never the body prose. A genuine
+    course listing can mention the phrase in passing ("if you get a page not
+    found error, contact us") and must not be thrown away for it, while a real
+    404 page says so in its title or its first heading essentially always.
+    """
+    if not html:
+        return False
+    for pat in (r"<title[^>]*>(.*?)</title>", r"<h[12][^>]*>(.*?)</h[12]>"):
+        for m in re.finditer(pat, html, re.IGNORECASE | re.DOTALL):
+            text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", m.group(1)))
+            if _SOFT_404.search(text):
+                return True
+    return False
+
 
 # HTTP statuses that mean "we are being refused", as opposed to "wrong guess".
 _REFUSAL_STATUSES = frozenset({401, 403, 429, 451})
@@ -589,20 +627,36 @@ def find_seeds(fetcher: Fetcher, website: str,
     base = f"{parts.scheme or 'https'}://{host}"
     apex = re.sub(r"^www\.", "", host)
 
-    def accept(final_url: str) -> bool:
-        """Reject a seed that is a sign-in wall rather than a listing."""
+    def rejection(res: FetchResult) -> str:
+        """Why this response is not a listing, or "" to accept it as a seed.
+
+        Two rejections, both observed on real sites. A sign-in wall
+        (`catalogue.abertay.ac.uk/mng/login`) answers 200 and yields nothing.
+        A soft 404 answers 200 with "Page not Found" and yields worse than
+        nothing -- its own navigation, harvested as though it were a Catalog.
+        """
+        final_url = clean_url(res.final_url)
         if _AUTH_PATH.search(urllib.parse.urlsplit(final_url).path):
             notes.append(f"rejected sign-in page as seed: {final_url}")
-            return False
-        return True
+            return "auth"
+        if looks_like_soft_404(res.text):
+            notes.append(f"rejected soft 404 as seed: {final_url}")
+            return "soft_404"
+        return ""
 
     for path in HUB_PATHS:
         res = fetcher.get(base + path)
+        why = rejection(res) if res.ok else ""
         if res.status is not None:
-            hub_statuses[res.status] = hub_statuses.get(res.status, 0) + 1
-        if res.ok:
+            # A soft 404 is counted as the 404 it is, not the 200 it claims.
+            # Otherwise a site whose every hub path serves an error page still
+            # shows 200s to `classify_probes` and never reaches `no_hub`,
+            # leaving it filed under a symptom no crawling can fix.
+            code = 404 if why == "soft_404" else res.status
+            hub_statuses[code] = hub_statuses.get(code, 0) + 1
+        if res.ok and not why:
             final = clean_url(res.final_url)
-            if final and final not in seeds and accept(final):
+            if final and final not in seeds:
                 seeds.append(final)
                 if registrable(urllib.parse.urlsplit(final).netloc) != \
                         registrable(host):
@@ -610,9 +664,9 @@ def find_seeds(fetcher: Fetcher, website: str,
 
     for sub in HUB_SUBDOMAINS:
         res = fetcher.get(f"https://{sub}.{apex}/")
-        if res.ok:
+        if res.ok and not rejection(res):
             final = clean_url(res.final_url)
-            if final and final not in seeds and accept(final):
+            if final and final not in seeds:
                 seeds.append(final)
                 notes.append(f"course subdomain {sub}.{apex} responded")
 
@@ -1007,6 +1061,17 @@ def build_catalog(fetcher: Fetcher, institution: str, website: str,
     distinction prevents inheriting the earlier pipeline's mistakes.
     """
     cat = Catalog(institution=institution)
+
+    def absorb(extra: list[Candidate]) -> None:
+        """Fold new Candidates in, deduped and free of the Institution name.
+
+        Applied at every rung rather than once at the end so that Extraction
+        Health counts canonical Candidates: a page collected twice under two
+        spellings must not read as two courses' worth of coverage.
+        """
+        cat.candidates = _drop_institution_names(
+            _merge(cat.candidates, extra), institution)
+
     if not website:
         cat.strategy = "none"
         cat.failure_reason = "no_website"
@@ -1066,7 +1131,7 @@ def build_catalog(fetcher: Fetcher, institution: str, website: str,
         cat.notes.append(
             f"{primary} refused every request: "
             f"{', '.join(f'{k}x{v}' for k, v in sorted(primary_statuses.items()))}")
-    cat.candidates = found
+    absorb(found)
     cat.pages_fetched += fetched
     cat.seed_yield = seed_yield
     cat.strategy = "listing"
@@ -1076,7 +1141,7 @@ def build_catalog(fetcher: Fetcher, institution: str, website: str,
         pri = harvest_prior_urls(fetcher, prior_urls, domains)
         if pri:
             cat.notes.append(f"prior URLs contributed {len(pri)} candidates")
-            cat.candidates = _merge(cat.candidates, pri)
+            absorb(pri)
             cat.strategy = "listing+prior"
             log.info(f"ladder: prior URLs -> {len(cat.candidates)} candidates",
                      extra={"event": "ladder.step", "step": "prior",
@@ -1090,7 +1155,7 @@ def build_catalog(fetcher: Fetcher, institution: str, website: str,
     if sm:
         cat.notes.append(f"sitemap contributed {len(sm)} candidates")
         before = len(cat.candidates)
-        cat.candidates = _merge(cat.candidates, sm)
+        absorb(sm)
         cat.seed_yield["(sitemap)"] = len(cat.candidates) - before
         cat.strategy = "listing+sitemap"
         log.info(f"ladder: sitemap -> {len(cat.candidates)} candidates",
@@ -1104,7 +1169,7 @@ def build_catalog(fetcher: Fetcher, institution: str, website: str,
     if js:
         cat.notes.append(f"json endpoint contributed {len(js)} candidates")
         before = len(cat.candidates)
-        cat.candidates = _merge(cat.candidates, js)
+        absorb(js)
         cat.seed_yield["(json)"] = len(cat.candidates) - before
         cat.strategy = cat.strategy + "+json"
         log.info(f"ladder: json endpoint -> {len(cat.candidates)} candidates",
@@ -1127,6 +1192,29 @@ def build_catalog(fetcher: Fetcher, institution: str, website: str,
             f"extraction health failed: {len(cat.candidates)} candidates "
             f"for {expected_rows} rows")
     return _log_catalog(cat, expected_rows)
+
+
+def _drop_institution_names(candidates: list[Candidate],
+                            institution: str) -> list[Candidate]:
+    """Rewrite Candidate names without the Institution's own name, then re-key.
+
+    A site prints one page two ways -- "Student Support" in one listing and
+    "Student Support | Webster University" in another -- and because a
+    Candidate's identity is (URL, Variant Stem), those became two Candidates
+    for a single page. Both then score identically against a Course Row, the
+    Margin between them is zero, and the row is filed `ambiguous` with nothing
+    to choose between. Measured on the finished sheet, 494 rows carried an
+    Institution word their course name lacked and just one of them reached
+    `verified`, against a 19.7% baseline.
+
+    `score()` already strips the Institution before comparing, so this changes
+    no Score. It aligns *identity* with what scoring was doing all along.
+    """
+    if not institution or not candidates:
+        return candidates
+    renamed = [replace(c, name=strip_institution(c.name, institution) or c.name)
+               for c in candidates]
+    return _merge(renamed, [])
 
 
 def _merge(a: list[Candidate], b: list[Candidate]) -> list[Candidate]:
