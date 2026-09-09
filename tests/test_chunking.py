@@ -348,6 +348,43 @@ class TestOutputPaths(unittest.TestCase):
         self.assertEqual(run.build_parser().parse_args([]).out_dir, "out")
 
 
+class TestPhase2DoesNotOverwriteItsInput(unittest.TestCase):
+    """Phase 2 reads a phase 1 result file, so it must not default onto it.
+
+    Sharing phase 1's default name meant a bare `--phase 2` read and wrote
+    the same path, destroying the input it was handed.
+    """
+
+    def resolve(self, *argv, chunk_tag=""):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        args = run.build_parser().parse_args(
+            ["--out-dir", os.path.join(self._dir.name, "out"), *argv])
+        run.resolve_output_paths(args, chunk_tag)
+        return args
+
+    def test_phase_2_writes_somewhere_else_by_default(self):
+        args = self.resolve("--phase", "2")
+        self.assertNotEqual(os.path.abspath(args.out),
+                            os.path.abspath(args.results))
+
+    def test_phase_2_default_is_named_for_the_phase(self):
+        args = self.resolve("--phase", "2")
+        self.assertEqual(os.path.basename(args.out), "phase2.csv")
+
+    def test_phase_1_default_is_unchanged(self):
+        args = self.resolve("--phase", "1")
+        self.assertEqual(os.path.basename(args.out), "courses_filled.csv")
+
+    def test_the_chunk_tag_still_applies(self):
+        args = self.resolve("--phase", "2", chunk_tag=".001")
+        self.assertEqual(os.path.basename(args.out), "phase2.001.csv")
+
+    def test_an_explicit_out_still_wins(self):
+        args = self.resolve("--phase", "2", "--out", "/tmp/mine/x.csv")
+        self.assertEqual(args.out, "/tmp/mine/x.csv")
+
+
 if __name__ == "__main__":
     unittest.main()
 

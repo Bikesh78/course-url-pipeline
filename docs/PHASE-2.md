@@ -127,12 +127,11 @@ ask.
 ## Running it
 
 ```bash
-# Triage only (no vendor needed, nothing spent)
-python run.py --phase 2 --out out/phase2.csv
+# Triage only (no vendor needed, nothing spent). Writes out/phase2.csv.
+python run.py --phase 2
 
 # With canned search results, to exercise the whole adoption path offline
-python run.py --phase 2 --search-fixture fixtures/search.json \
-    --out out/phase2.csv
+python run.py --phase 2 --search-fixture fixtures/search.json
 
 # Live, capped to 500 paid calls (key from .env)
 python run.py --phase 2 --results out/phase2.csv \
@@ -146,6 +145,7 @@ python run.py --phase 2 --results out/phase2.csv \
 | `--search-delay` | seconds between paid calls (default 0.2) |
 | `--search-fixture` | canned results; wins over `--search-provider` |
 | `--env-file` | where to read `KEY=value` lines from (default `.env`) |
+| `--out` | defaults to `out/phase2.csv` — deliberately *not* the phase 1 name, so a bare `--phase 2` cannot overwrite the result file it reads |
 
 Exit codes: `0` normal, `2` the provider could not be built (no key), `3` the
 search stage aborted on the vendor mid-run. A `3` still writes the output file

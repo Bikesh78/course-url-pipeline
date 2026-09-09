@@ -246,7 +246,7 @@ crawling anything.
 
 ```bash
 # Prior-URL triage only. No network, no vendor, no cost.
-python run.py --phase 2 --out out/phase2.csv
+python run.py --phase 2                    # writes out/phase2.csv
 ```
 
 **Triage** chooses between our URL and the one the source sheet already had,

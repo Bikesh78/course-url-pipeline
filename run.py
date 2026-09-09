@@ -411,9 +411,17 @@ def resolve_output_paths(args, chunk_tag: str = "") -> None:
     under `--out-dir` — a caller who names a file gets that file. Directories
     are created for whichever paths result, explicit ones included, so a long
     run cannot fail at its final write for a missing directory.
+
+    **Phase 2 defaults to a different primary output.** It reads a phase 1
+    result file, so sharing phase 1's default name would make a bare
+    `--phase 2` read and overwrite the same file — destroying the input it was
+    given. The other three defaults are set but unused: phase 2 writes only
+    `--out`.
     """
+    primary = ("phase2" if getattr(args, "phase", 1) == 2
+               else "courses_filled")
     defaults = {
-        "out": f"courses_filled{chunk_tag}.csv",
+        "out": f"{primary}{chunk_tag}.csv",
         "review_out": f"review_queue{chunk_tag}.csv",
         "report_out": f"coverage_report{chunk_tag}.md",
         "calibration_out": f"calibration_sample{chunk_tag}.csv",
