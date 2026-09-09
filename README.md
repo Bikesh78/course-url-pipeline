@@ -29,6 +29,7 @@ from patterns.
 | why results live in SQLite too | [docs/adr/0005-sqlite-for-run-state-and-url-history.md](./docs/adr/0005-sqlite-for-run-state-and-url-history.md) |
 | why crawling is per-site, not per-institution | [docs/adr/0006-the-crawl-unit-is-a-website-not-an-institution.md](./docs/adr/0006-the-crawl-unit-is-a-website-not-an-institution.md) |
 | why the environment is pinned, and what an undeclared one cost | [docs/adr/0008](./docs/adr/0008-pinned-environment.md) |
+| why there is one result file, not one per phase | [docs/adr/0009](./docs/adr/0009-one-result-file.md) |
 
 ## Guarantees
 
@@ -246,7 +247,7 @@ crawling anything.
 
 ```bash
 # Prior-URL triage only. No network, no vendor, no cost.
-python run.py --phase 2                    # writes out/phase2.csv
+python run.py --phase 2                    # updates out/courses_filled.csv
 ```
 
 **Triage** chooses between our URL and the one the source sheet already had,
@@ -332,9 +333,19 @@ Anything under `out/scratch/` is disposable by definition, so it can be emptied
 without reading the filenames &mdash; which is the property the flat directory
 lacked.
 
+**There is one result file.** `out/courses_filled.csv` is created by Phase 1 and
+*updated in place* by Phase 2, so the pipeline's answer is always in one place
+rather than split across two files of identical shape. Phase 1's own answer is
+kept in the row as `phase1_course_url` / `phase1_matched_status`, and the write
+is atomic with a `.bak` — see
+[docs/adr/0009](./docs/adr/0009-one-result-file.md).
+
+Phase 2 is **idempotent**: running it twice over the same file produces a
+byte-identical result.
+
 | File | Contents |
 |---|---|
-| `out/courses_filled.csv` | all input columns plus `course_url`, `matched_score`, `matched_status`, `match_margin`, `live_page_score`, `match_evidence`, `row_flags` |
+| `out/courses_filled.csv` | **the result** — all input columns plus `course_url`, `matched_score`, `matched_status`, `match_margin`, `live_page_score`, `match_evidence`, `row_flags`, the provenance columns, `phase`, and what Phase 1 alone decided |
 | `out/review_queue.csv` | only rows needing human triage, worst Margin first, both competing Candidates shown side by side |
 | `out/coverage_report.md` | coverage %, Review Queue size, per-Institution Extraction Health — the input to the Phase 2 spend decision |
 | `out/calibration_sample.csv` | ~150 stratified rows for one-time human labelling to fit thresholds |

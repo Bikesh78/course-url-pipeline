@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -348,11 +349,17 @@ class TestOutputPaths(unittest.TestCase):
         self.assertEqual(run.build_parser().parse_args([]).out_dir, "out")
 
 
-class TestPhase2DoesNotOverwriteItsInput(unittest.TestCase):
-    """Phase 2 reads a phase 1 result file, so it must not default onto it.
+class TestPhase2UpdatesInPlace(unittest.TestCase):
+    """One result file: phase 2 rewrites the file it read.
 
-    Sharing phase 1's default name meant a bare `--phase 2` read and wrote
-    the same path, destroying the input it was handed.
+    This reverses the guard added in 5fbcf9a, which stopped `--phase 2`
+    defaulting onto its own input. That guard existed because overwriting
+    destroyed phase 1's answer irrecoverably -- hours of crawling to rebuild.
+    It no longer can: `phase1_course_url` keeps that answer in the row, so the
+    only remaining hazard is a truncated write, which the atomic swap covers.
+
+    What replaced the assertion is the two properties below plus, in
+    test_triage, that phase 1's URL survives in its own column.
     """
 
     def resolve(self, *argv, chunk_tag=""):
@@ -363,26 +370,65 @@ class TestPhase2DoesNotOverwriteItsInput(unittest.TestCase):
         run.resolve_output_paths(args, chunk_tag)
         return args
 
-    def test_phase_2_writes_somewhere_else_by_default(self):
+    def test_phase_2_writes_the_file_it_read(self):
         args = self.resolve("--phase", "2")
-        self.assertNotEqual(os.path.abspath(args.out),
-                            os.path.abspath(args.results))
+        self.assertEqual(args.out, args.results)
 
-    def test_phase_2_default_is_named_for_the_phase(self):
-        args = self.resolve("--phase", "2")
-        self.assertEqual(os.path.basename(args.out), "phase2.csv")
+    def test_an_explicit_out_still_wins(self):
+        """The batch and verification workflows both rely on this."""
+        args = self.resolve("--phase", "2", "--out", "/tmp/mine/x.csv")
+        self.assertEqual(args.out, "/tmp/mine/x.csv")
+        self.assertNotEqual(args.out, args.results)
 
-    def test_phase_1_default_is_unchanged(self):
+    def test_phase_1_is_unaffected(self):
         args = self.resolve("--phase", "1")
         self.assertEqual(os.path.basename(args.out), "courses_filled.csv")
 
-    def test_the_chunk_tag_still_applies(self):
-        args = self.resolve("--phase", "2", chunk_tag=".001")
-        self.assertEqual(os.path.basename(args.out), "phase2.001.csv")
+    def test_phase_1_keeps_its_chunk_tag(self):
+        args = self.resolve("--phase", "1", chunk_tag=".001")
+        self.assertEqual(os.path.basename(args.out), "courses_filled.001.csv")
 
-    def test_an_explicit_out_still_wins(self):
-        args = self.resolve("--phase", "2", "--out", "/tmp/mine/x.csv")
-        self.assertEqual(args.out, "/tmp/mine/x.csv")
+
+class TestAtomicWrite(unittest.TestCase):
+    """A crash mid-write must not truncate the only result file."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.path = os.path.join(self._dir.name, "result.csv")
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write("id,course_url\noriginal,https://x/a\n")
+
+    def rows(self):
+        return [{"id": "1", "course_url": "https://x/new"}]
+
+    def test_it_replaces_the_file(self):
+        run.write_rows_atomically(self.rows(), self.path, backup=False)
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertIn("https://x/new", fh.read())
+
+    def test_it_keeps_a_backup_by_default(self):
+        run.write_rows_atomically(self.rows(), self.path)
+        with open(self.path + ".bak", encoding="utf-8") as fh:
+            self.assertIn("original", fh.read())
+
+    def test_a_failure_leaves_the_original_intact(self):
+        import csv as _csv
+        with unittest.mock.patch.object(
+                _csv.DictWriter, "writerows", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                run.write_rows_atomically(self.rows(), self.path)
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertIn("original", fh.read(), "the original was clobbered")
+
+    def test_a_failure_leaves_no_temporary_file_behind(self):
+        import csv as _csv
+        with unittest.mock.patch.object(
+                _csv.DictWriter, "writerows", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                run.write_rows_atomically(self.rows(), self.path)
+        strays = [f for f in os.listdir(self._dir.name) if f.endswith(".tmp")]
+        self.assertEqual(strays, [])
 
 
 if __name__ == "__main__":

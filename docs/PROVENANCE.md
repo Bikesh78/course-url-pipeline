@@ -29,6 +29,22 @@ several hundred rows out of `changed` and into `unchanged`.
 334 of the changed rows had replaced a working URL with one that returned 404,
 and nothing in the output said so.
 
+## `phase1_course_url` and `phase1_matched_status`
+
+What extraction alone decided, kept beside what was finally delivered. These
+are what let one file be the whole result: `prior_course_url` holds the
+*sheet's* URL, so without them the 1,307 rows where triage adopted a prior over
+ours would lose Phase 1's answer entirely, recoverable only by a re-crawl.
+
+They also make Phase 2 idempotent. Triage decides from these rather than from
+whatever the last run delivered, so running Phase 2 twice produces a
+byte-identical file. Reading the delivered column instead meant "our answer"
+drifted with each run — 9 extra adoptions, and 9 fewer sharing refusals.
+
+Blank on a row whose delivered URL came from Phase 2 in a file written before
+these columns existed: that file never recorded what extraction found, and a
+guess would be a lie the pipeline then trusts.
+
 ## `phase`
 
 | value | meaning |

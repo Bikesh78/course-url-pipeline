@@ -127,7 +127,8 @@ ask.
 ## Running it
 
 ```bash
-# Triage only (no vendor needed, nothing spent). Writes out/phase2.csv.
+# Triage only (no vendor needed, nothing spent).
+# Updates out/courses_filled.csv in place, keeping a .bak.
 python run.py --phase 2
 
 # With canned search results, to exercise the whole adoption path offline.
@@ -148,7 +149,8 @@ python run.py --phase 2 --results out/phase2.csv \
 | `--search-delay` | seconds between paid calls (default 0.2) |
 | `--search-fixture` | canned results; wins over `--search-provider` |
 | `--env-file` | where to read `KEY=value` lines from (default `.env`) |
-| `--out` | defaults to `out/phase2.csv` — deliberately *not* the phase 1 name, so a bare `--phase 2` cannot overwrite the result file it reads |
+| `--out` | defaults to `--results`, so Phase 2 updates the one result file in place; the write is atomic and keeps a `.bak` |
+| `--no-backup` | skip that `.bak` |
 | `--search-ids` | file of course ids to restrict search to; see `tools/sample_search_targets.py` |
 | `--verify-search` | fetch each adopted URL and score the live page against the course name |
 

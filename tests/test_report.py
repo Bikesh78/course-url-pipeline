@@ -175,8 +175,10 @@ class TestPhaseColumn(unittest.TestCase):
         """Renaming a status must not leave this mapping stale."""
         self.assertEqual(set(PHASE_2_STATUSES), {CARRIED_OVER, SEARCH_FOUND})
 
-    def test_it_is_the_last_output_column(self):
-        self.assertEqual(OUTPUT_COLUMNS[-1], "phase")
+    def test_it_is_appended_after_the_provenance_columns(self):
+        """Appended, not inserted; `phase1_*` were later appended after it."""
+        self.assertGreater(OUTPUT_COLUMNS.index("phase"),
+                           OUTPUT_COLUMNS.index("url_change"))
 
 
 class TestPhaseNeverDisagreesWithStatus(unittest.TestCase):

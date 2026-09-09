@@ -50,20 +50,15 @@ from pipeline.catalog import _slug_to_name, clean_url
 from pipeline.load import _host_of
 from pipeline.match import FLOOR, SHARE_CAP
 from pipeline.normalize import are_variant_siblings, score
+from pipeline.statuses import (CARRIED_OVER, PHASE_2_STATUSES, SEARCH_FOUND,
+                               TRUSTED_PRIOR, URL_DEAD, WEAK_STATUSES)
 
-# Statuses whose URL we will give up in favour of a prior one. `verified` is
-# absent deliberately: it beat the prior 8:1 where the prior was
-# `low_confidence`, and was ahead even against `matched`.
-WEAK_STATUSES = ("ambiguous",)
-
+# The vocabulary lives in `pipeline.statuses` so that search can import it
+# too -- search already imports this module, so the reverse would be a cycle.
+# Re-exported here because this is where the adoption rules read.
+#
 # Our own URL is known broken, so almost any live alternative is better.
-DEAD_STATUS = "url_dead"
-
-# Prior labels we will swap *towards*. `low_confidence` is excluded: our
-# `ambiguous` beat it 1321:1105, so swapping would lose rows.
-TRUSTED_PRIOR = ("matched",)
-
-CARRIED_OVER = "carried_over"
+DEAD_STATUS = URL_DEAD
 
 
 @dataclass
@@ -152,6 +147,45 @@ def _sharing_would_break(url: str, name: str, holders: dict[str, list[str]],
     return not all(are_variant_siblings(name, names[rid]) for rid in current)
 
 
+def add_flag(row: dict, flag: str) -> None:
+    """Append *flag* to `row_flags` unless it is already there.
+
+    Appending unconditionally made phase 2 non-idempotent in a way the
+    decision counts did not reveal: a re-run reached the same verdict for
+    every row and still produced a different file, because a refusal flag was
+    recorded twice. Comparing flags as a *set* hid it, which is why the guard
+    lives here rather than in a caller.
+    """
+    existing = [f for f in (row.get("row_flags") or "").split(";") if f]
+    if flag not in existing:
+        existing.append(flag)
+    row["row_flags"] = ";".join(existing)
+
+
+def phase1_url(row: dict) -> str:
+    """What extraction decided for this row, whatever has happened since.
+
+    Read from `phase1_course_url` when present, falling back to `course_url`
+    for a result file written before that column existed — where the two are
+    equal by definition, since nothing has yet overwritten it.
+
+    Deciding from this rather than from the delivered column is what makes
+    phase 2 idempotent. Reading `course_url` meant "our answer" was whatever
+    the *last* run delivered, so re-running triage over its own output adopted
+    9 more rows and refused 9 fewer by the sharing rule.
+    """
+    if "phase1_course_url" in row:
+        return (row.get("phase1_course_url") or "").strip()
+    return (row.get("course_url") or "").strip()
+
+
+def phase1_status(row: dict) -> str:
+    """The status extraction assigned, paired with `phase1_url`."""
+    if "phase1_matched_status" in row:
+        return (row.get("phase1_matched_status") or "").strip()
+    return (row.get("matched_status") or "").strip()
+
+
 class ShareIndex:
     """Which URLs are held by which Course Rows, scoped per Site.
 
@@ -167,7 +201,7 @@ class ShareIndex:
         self.names: dict[str, str] = {}
         for r in rows:
             self.names[r["id"]] = r.get("name", "")
-            url = (r.get("course_url") or "").strip()
+            url = phase1_url(r)
             if url:
                 self.by_site[_host_of(r.get("website", ""))][url].append(r["id"])
 
@@ -205,10 +239,24 @@ def triage_rows(rows: list[dict], source: dict[str, dict],
         src = source.get(r["id"], {})
         prior = (src.get("course_url") or "").strip()
         prior_status = (src.get("matched_status") or "").strip()
-        ours = (r.get("course_url") or "").strip()
-        status = (r.get("matched_status") or "").strip()
+        ours = phase1_url(r)
+        status = phase1_status(r)
         name = r.get("name", "")
         inst = r.get("institution_name", "")
+
+        # A row search already answered is left exactly as it is. Triage
+        # decides from phase 1's columns, and for these rows extraction found
+        # nothing -- so without this it would read "we have nothing", adopt a
+        # prior URL, and silently undo work that cost money. 6 of the 131 rows
+        # in the first search trial had a gate-clearing prior.
+        if (r.get("matched_status") or "").strip() == SEARCH_FOUND:
+            stats.kept_ours += 1
+            r["prior_course_url"] = prior
+            r["prior_matched_status"] = prior_status
+            r["url_change"] = classify_change(
+                prior, (r.get("course_url") or "").strip())
+            stats.changes[r["url_change"]] += 1
+            continue
 
         # Canonicalise our own URL too, not just adopted ones. A result file
         # written before `clean_url` learned to strip trailing slashes and
@@ -245,10 +293,7 @@ def triage_rows(rows: list[dict], source: dict[str, dict],
             site = _host_of(r.get("website", ""))
             if index.would_break(site, clean_url(prior), name):
                 stats.rejected_by_sharing += 1
-                r.setdefault("row_flags", "")
-                r["row_flags"] = ";".join(
-                    f for f in [r.get("row_flags", ""),
-                                "adoption_denied_sharing"] if f)
+                add_flag(r, "adoption_denied_sharing")
                 adopt_reason = None
 
         if adopt_reason:
@@ -261,9 +306,7 @@ def triage_rows(rows: list[dict], source: dict[str, dict],
             r["match_evidence"] = (
                 f"carried from source sheet (prior status: "
                 f"{prior_status or 'unknown'})")
-            r["row_flags"] = ";".join(
-                f for f in [r.get("row_flags", ""), "url_from_source_sheet"]
-                if f)
+            add_flag(r, "url_from_source_sheet")
             setattr(stats, f"adopted_{adopt_reason}",
                     getattr(stats, f"adopted_{adopt_reason}") + 1)
         else:

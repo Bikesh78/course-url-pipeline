@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import logging
 import csv
 import time
@@ -29,14 +30,15 @@ from pipeline.logging_setup import set_current_site, setup_logging
 from pipeline.search import (SEARCH_FOUND, SERPER_DELAY, FixtureProvider,
                             NullProvider, SearchProviderError, SerperProvider,
                             search_rows, searchable_rows)
+from pipeline.statuses import PHASE_2_STATUSES
 from pipeline.store import DEFAULT_DB, Store, new_run_id
-from pipeline.triage import ShareIndex, triage_rows
+from pipeline.triage import ShareIndex, add_flag, triage_rows
 from pipeline.load import (DEFAULT_INPUT, dedupe, group_by_site,
                            load_rows,
                            normalise_website, site_display_name)
 from pipeline.match import FLOOR, MatchResult, Thresholds, assign
 from pipeline.normalize import score as score_pair
-from pipeline.report import (DEFAULT_OUT_DIR, phase_for,
+from pipeline.report import (DEFAULT_OUT_DIR, PHASE_1_COLUMNS, phase_for,
                              write_calibration_sample, write_coverage_report,
                              write_filled_csv, write_review_queue)
 
@@ -277,6 +279,32 @@ def process_site(fetcher: Fetcher, site_key: str, rows: list,
     return out, health
 
 
+def write_rows_atomically(rows, path: str, backup: bool = True) -> None:
+    """Write *rows* to *path* via a temporary file, then swap it in.
+
+    Phase 2 writes the file it just read, so a crash mid-write would truncate
+    the only result there is. Same pattern as
+    `tools/backfill_provenance.py`: write beside the target, `os.replace` it
+    into position -- atomic on the same filesystem -- and keep the previous
+    version as `.bak` so a bad run is one `mv` from undone.
+    """
+    fields = list(rows[0].keys()) if rows else []
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=fields)
+            w.writeheader()
+            w.writerows(rows)
+        if backup and os.path.exists(path):
+            os.replace(path, path + ".bak")
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def verify_search_rows(rows, fetcher, log, run_id: str) -> dict:
     """Fetch each search-adopted URL and score the live page against the name.
 
@@ -301,9 +329,7 @@ def verify_search_rows(rows, fetcher, log, run_id: str) -> dict:
         page = fetcher.get(url)
         if page.status != 200 or not page.text:
             counts[f"http_{page.status}"] += 1
-            r["row_flags"] = ";".join(
-                f for f in [r.get("row_flags", ""),
-                            f"search_verify_http_{page.status}"] if f)
+            add_flag(r, f"search_verify_http_{page.status}")
             continue
         heading = page_heading(page.text) or page_title(page.text)
         live = score_pair(r.get("name", ""), heading,
@@ -357,6 +383,39 @@ def run_phase2(args, run_id: str, log) -> int:
         source = {r["id"]: r for r in csv.DictReader(fh)}
     with open(args.results, encoding="utf-8", newline="") as fh:
         rows = list(csv.DictReader(fh))
+
+    # Capture what extraction decided, before triage or search can change it.
+    # A file phase 1 wrote already carries these; one written before the
+    # columns existed does not, and there the delivered URL *is* phase 1's
+    # answer because nothing has touched it yet. Back-filling here rather than
+    # asking for a re-crawl is what lets an existing result file become the
+    # single result file.
+    # Keyed on the column being *absent*, never on it being empty. An empty
+    # `phase1_course_url` in a file that has the column is meaningful -- it
+    # says extraction found nothing -- and treating that as "needs filling"
+    # overwrote it with whatever triage had adopted, which destroyed the
+    # distinction and cost idempotency: the second run then saw its own
+    # adoptions as phase 1's work and stopped re-deriving them.
+    backfilled = 0
+    for r in rows:
+        if "phase1_course_url" not in r:
+            backfilled += 1
+            # A row already decided by phase 2 is the one case where the
+            # delivered URL is *not* extraction's answer, and this file never
+            # recorded what was. Left blank rather than guessed: claiming a
+            # carried-over or search-found URL came from extraction would be
+            # a lie the rest of the pipeline then trusts.
+            if (r.get("matched_status") or "").strip() in PHASE_2_STATUSES:
+                r["phase1_course_url"] = ""
+                r["phase1_matched_status"] = ""
+            else:
+                r["phase1_course_url"] = (r.get("course_url") or "").strip()
+                r["phase1_matched_status"] = (
+                    r.get("matched_status") or "").strip()
+    if backfilled:
+        log.info(f"captured phase 1's answer for {backfilled} rows "
+                 f"({', '.join(PHASE_1_COLUMNS)})",
+                 extra={"run_id": run_id, "phase1_backfilled": backfilled})
 
     before = sum(1 for r in rows if (r.get("course_url") or "").strip())
     log.info(f"phase 2 over {len(rows)} rows from {args.results} "
@@ -445,11 +504,7 @@ def run_phase2(args, run_id: str, log) -> int:
         r["phase"] = phase_for(r.get("matched_status", ""),
                                r.get("course_url", ""))
 
-    fields = list(rows[0].keys()) if rows else []
-    with open(args.out, "w", encoding="utf-8", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=fields)
-        w.writeheader()
-        w.writerows(rows)
+    write_rows_atomically(rows, args.out, backup=not args.no_backup)
 
     drifted = 0
     if store:
@@ -497,10 +552,14 @@ def resolve_output_paths(args, chunk_tag: str = "") -> None:
     given. The other three defaults are set but unused: phase 2 writes only
     `--out`.
     """
-    primary = ("phase2" if getattr(args, "phase", 1) == 2
-               else "courses_filled")
+    # Phase 2 updates the result file in place, so there is one result rather
+    # than two files of identical shape where nothing says which to open. The
+    # baseline it used to protect now lives in the row itself, in
+    # `phase1_course_url` -- see docs/adr/0009.
+    if getattr(args, "phase", 1) == 2 and not getattr(args, "out", None):
+        args.out = args.results
     defaults = {
-        "out": f"{primary}{chunk_tag}.csv",
+        "out": f"courses_filled{chunk_tag}.csv",
         "review_out": f"review_queue{chunk_tag}.csv",
         "report_out": f"coverage_report{chunk_tag}.md",
         "calibration_out": f"calibration_sample{chunk_tag}.csv",
@@ -558,6 +617,9 @@ def build_parser() -> argparse.ArgumentParser:
                     choices=("null", "serper"),
                     help="phase 2: search vendor. 'serper' spends real money "
                          "and reads its key from $SERPER_API_KEY")
+    ap.add_argument("--no-backup", action="store_true",
+                    help="phase 2: skip the .bak copy of the file being "
+                         "replaced")
     ap.add_argument("--search-ids", default=None,
                     help="phase 2: file of course ids, one per line, to "
                          "restrict search to; see "

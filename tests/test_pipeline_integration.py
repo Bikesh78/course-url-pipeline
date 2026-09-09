@@ -403,9 +403,16 @@ class TestPhase1Provenance(unittest.TestCase):
             self.assertGreater(OUTPUT_COLUMNS.index(name),
                                OUTPUT_COLUMNS.index("row_flags"))
 
-    def test_the_phase_column_is_last(self):
-        from pipeline.report import OUTPUT_COLUMNS
-        self.assertEqual(OUTPUT_COLUMNS[-1], "phase")
+    def test_the_phase_column_is_appended_after_provenance(self):
+        """Appended, not inserted -- later columns may follow it."""
+        from pipeline.report import OUTPUT_COLUMNS, PROVENANCE_COLUMNS
+        self.assertGreater(OUTPUT_COLUMNS.index("phase"),
+                           OUTPUT_COLUMNS.index(PROVENANCE_COLUMNS[-1]))
+
+    def test_the_phase_1_columns_come_last(self):
+        from pipeline.report import OUTPUT_COLUMNS, PHASE_1_COLUMNS
+        self.assertEqual(OUTPUT_COLUMNS[-len(PHASE_1_COLUMNS):],
+                         PHASE_1_COLUMNS)
 
 
 class TestReviewQueueShowsEveryCandidate(unittest.TestCase):

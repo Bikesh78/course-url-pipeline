@@ -53,7 +53,9 @@ from pipeline.catalog import clean_url
 from pipeline.fetch import registrable
 from pipeline.load import _host_of
 from pipeline.match import FLOOR
-from pipeline.triage import ShareIndex, classify_change, gate_score
+from pipeline.statuses import SEARCH_FOUND
+from pipeline.triage import (ShareIndex, add_flag, classify_change,
+                            gate_score)
 
 # Flags marking rows for which no course page can exist.
 UNSEARCHABLE_FLAGS = ("occupation_code_not_course", "year_level_not_course")
@@ -67,9 +69,9 @@ INACTIVE_MARKER = "(inactive)"
 
 MAX_RESULTS = 5
 
-# A search result is never `verified`: verification means we fetched the page
-# and confirmed it, which a ranking cannot stand in for.
-SEARCH_FOUND = "search_found"
+# Re-exported from `pipeline.statuses`, which owns the vocabulary. A search
+# result is never `verified`: verification means we fetched the page and
+# confirmed it, which a ranking cannot stand in for.
 
 SERPER_ENDPOINT = "https://google.serper.dev/search"
 # The key is read from the environment and never from a CLI flag: `run.py`
@@ -457,9 +459,7 @@ def search_rows(rows: list[dict], provider: SearchProvider,
         url = clean_url(best)
         if index.would_break(site, url, name):
             stats.rejected_by_sharing += 1
-            r["row_flags"] = ";".join(
-                f for f in [r.get("row_flags", ""), "search_denied_sharing"]
-                if f)
+            add_flag(r, "search_denied_sharing")
             continue
 
         r["course_url"] = url
@@ -470,8 +470,7 @@ def search_rows(rows: list[dict], provider: SearchProvider,
         r["match_margin"] = ""
         r["match_evidence"] = (f"search result on {site} "
                                f"(provider: {type(provider).__name__})")
-        r["row_flags"] = ";".join(
-            f for f in [r.get("row_flags", ""), "url_from_search"] if f)
+        add_flag(r, "url_from_search")
         r["url_change"] = classify_change(
             (r.get("prior_course_url") or "").strip(), url)
         index.move(site, "", url, r["id"])

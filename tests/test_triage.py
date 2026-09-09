@@ -2,7 +2,9 @@
 
 import unittest
 
-from pipeline.triage import (CARRIED_OVER, classify_change, gate_score,
+from pipeline.statuses import SEARCH_FOUND
+from pipeline.triage import (CARRIED_OVER, add_flag, classify_change,
+                             gate_score,
                              triage_rows)
 
 SITE = "https://courses.aber.ac.uk"
@@ -192,6 +194,97 @@ class TestProvenanceIsAlwaysWritten(unittest.TestCase):
         rows = [row("1", "Data Science BSc (Hons)")]
         triage_rows(rows, {"1": source("1", DS, "matched")})
         self.assertEqual(rows[0]["url_change"], "unchanged")
+
+
+class TestDecidesFromPhase1NotFromWhatWasDelivered(unittest.TestCase):
+    """Triage reads `phase1_course_url`, which is what makes it idempotent.
+
+    Reading the delivered column meant "our answer" was whatever the last run
+    produced, so re-running adopted 9 more rows and refused 9 fewer by the
+    sharing rule -- exactly offsetting, which is how the share index was
+    identified as the sole cause.
+    """
+
+    def row2(self, rid, name, phase1_url, delivered, status, phase1_status):
+        r = row(rid, name, url=delivered, status=status)
+        r["phase1_course_url"] = phase1_url
+        r["phase1_matched_status"] = phase1_status
+        return r
+
+    def test_a_second_pass_reaches_the_same_verdict(self):
+        rows = [self.row2("1", "Data Science", "", DS_OTHER, CARRIED_OVER,
+                          "no_match")]
+        src = {"1": source("1", DS_OTHER, "matched")}
+        first = triage_rows([dict(rows[0])], src)
+        again = triage_rows(rows, src)
+        self.assertEqual((first.adopted, first.kept_ours),
+                         (again.adopted, again.kept_ours))
+
+    def test_phase_1_answer_is_preserved_not_overwritten(self):
+        rows = [self.row2("1", "Data Science", DS, DS, "ambiguous",
+                          "ambiguous")]
+        triage_rows(rows, {"1": source("1", DS_OTHER, "matched")})
+        self.assertEqual(rows[0]["phase1_course_url"], DS,
+                         "phase 1's answer must survive its replacement")
+
+    def test_it_falls_back_to_course_url_when_the_column_is_absent(self):
+        """An older result file still triages correctly."""
+        r = row("1", "Data Science", url=DS, status="ambiguous")
+        self.assertNotIn("phase1_course_url", r)
+        triage_rows([r], {"1": source("1", DS, "matched")})
+        self.assertEqual(r["course_url"], DS)
+
+
+class TestSearchResultsAreNotGivenUp(unittest.TestCase):
+    """Triage must not undo work that cost money.
+
+    Phase 1 found nothing for these rows, so triage reading the phase-1
+    columns sees "we have nothing" and would adopt a prior instead. 6 of the
+    131 rows in the first live trial had a gate-clearing prior.
+    """
+
+    def searched_row(self):
+        r = row("1", "Data Science", url=DS, status=SEARCH_FOUND)
+        r["phase1_course_url"] = ""
+        r["phase1_matched_status"] = "no_catalog"
+        return r
+
+    def test_a_search_result_survives_a_gate_clearing_prior(self):
+        r = self.searched_row()
+        stats = triage_rows([r], {"1": source("1", DS_OTHER, "matched")})
+        self.assertEqual(r["course_url"], DS)
+        self.assertEqual(r["matched_status"], SEARCH_FOUND)
+        self.assertEqual(stats.adopted, 0)
+
+    def test_its_provenance_is_still_written(self):
+        r = self.searched_row()
+        triage_rows([r], {"1": source("1", DS_OTHER, "matched")})
+        self.assertEqual(r["prior_course_url"], DS_OTHER)
+        self.assertEqual(r["url_change"], "changed")
+
+
+class TestFlagsAreAppendedOnce(unittest.TestCase):
+    """A re-run reached the same verdict and still wrote a different file."""
+
+    def test_a_repeated_flag_is_not_duplicated(self):
+        r = {"row_flags": "already_there"}
+        add_flag(r, "already_there")
+        self.assertEqual(r["row_flags"], "already_there")
+
+    def test_a_new_flag_is_appended(self):
+        r = {"row_flags": "one"}
+        add_flag(r, "two")
+        self.assertEqual(r["row_flags"], "one;two")
+
+    def test_it_works_on_an_empty_field(self):
+        r = {"row_flags": ""}
+        add_flag(r, "one")
+        self.assertEqual(r["row_flags"], "one")
+
+    def test_it_works_on_a_missing_field(self):
+        r = {}
+        add_flag(r, "one")
+        self.assertEqual(r["row_flags"], "one")
 
 
 if __name__ == "__main__":

@@ -10,8 +10,8 @@ from collections import Counter, defaultdict
 from pipeline.catalog import describe_parser_tier
 from pipeline.load import INPUT_COLUMNS
 from pipeline.match import MatchResult
-from pipeline.search import SEARCH_FOUND
-from pipeline.triage import CARRIED_OVER, classify_change
+from pipeline.statuses import PHASE_2_STATUSES
+from pipeline.triage import classify_change
 
 # Provenance columns are appended, never inserted: a consumer reading by name
 # is unaffected, and one reading by position is at least not silently shifted.
@@ -34,9 +34,9 @@ DEFAULT_OUT_DIR = "out"
 # exceptions -- so this exists purely so a reader can filter `phase == 2`
 # without first learning that vocabulary.
 #
-# Imported rather than re-spelled, so renaming a status cannot leave this
-# mapping quietly pointing at a string nothing produces any more.
-PHASE_2_STATUSES = (CARRIED_OVER, SEARCH_FOUND)
+# `PHASE_2_STATUSES` comes from `pipeline.statuses`, which owns the vocabulary,
+# so renaming a status cannot leave this mapping pointing at a string nothing
+# produces any more.
 
 
 def phase_for(status: str, url: str) -> str:
@@ -56,9 +56,18 @@ def phase_for(status: str, url: str) -> str:
     return "2" if (status or "").strip() in PHASE_2_STATUSES else "1"
 
 
+# What extraction alone decided, kept beside what was finally delivered.
+#
+# This is what lets one file be the whole result. `prior_course_url` holds the
+# *sheet's* URL, so without these the ~1,307 rows where triage adopted a prior
+# over ours would lose phase 1's answer entirely, and the only way to recover
+# it would be a re-crawl. They are also what makes phase 2 idempotent: triage
+# decides from these rather than from whatever the last run delivered.
+PHASE_1_COLUMNS = ["phase1_course_url", "phase1_matched_status"]
+
 OUTPUT_COLUMNS = INPUT_COLUMNS + ["match_margin", "live_page_score",
                                   "match_evidence", "row_flags"] + \
-    PROVENANCE_COLUMNS + ["phase"]
+    PROVENANCE_COLUMNS + ["phase"] + PHASE_1_COLUMNS
 
 # The reviewer is choosing between candidates, so every candidate belongs here.
 # The sheet's own URL is frequently the best of them — on `ambiguous` rows a
@@ -111,6 +120,8 @@ def write_filled_csv(results: list[MatchResult], path: str) -> None:
                 (row.raw.get("matched_status") or "").strip(),
                 classify_change(row.prior_course_url, res.url),
                 phase_for(_status_for_csv(res), res.url),
+                res.url,
+                _status_for_csv(res),
             ])
 
 
