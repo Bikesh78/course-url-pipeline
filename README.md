@@ -309,6 +309,29 @@ repo root.
 exactly there, `--out-dir` notwithstanding, and its parent directory is created
 if needed.
 
+### Throwaway runs go to `out/scratch/`
+
+`out/` holds deliverables. A verification run &mdash; proving an output is
+byte-identical, exercising the search path against a fixture, checking a flag
+does what it claims &mdash; produces a 20MB file that looks exactly like a
+deliverable and is not one. Twelve of those accumulated during Phase 2 work,
+260MB of near-identical CSVs among the four files that actually mattered.
+
+No new machinery: `--out-dir` already does it, and parent directories are
+created for explicit paths too.
+
+```bash
+# a verification run, clearly not a deliverable
+python run.py --phase 2 --out-dir out/scratch --out out/scratch/nullcheck.csv
+
+# a whole phase 1 run's four outputs, kept aside
+python run.py --limit 3 --out-dir out/scratch
+```
+
+Anything under `out/scratch/` is disposable by definition, so it can be emptied
+without reading the filenames &mdash; which is the property the flat directory
+lacked.
+
 | File | Contents |
 |---|---|
 | `out/courses_filled.csv` | all input columns plus `course_url`, `matched_score`, `matched_status`, `match_margin`, `live_page_score`, `match_evidence`, `row_flags` |

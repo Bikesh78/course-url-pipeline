@@ -130,8 +130,11 @@ ask.
 # Triage only (no vendor needed, nothing spent). Writes out/phase2.csv.
 python run.py --phase 2
 
-# With canned search results, to exercise the whole adoption path offline
-python run.py --phase 2 --search-fixture fixtures/search.json
+# With canned search results, to exercise the whole adoption path offline.
+# A verification run, so it goes to out/scratch/ rather than among the
+# deliverables -- see the Outputs section of README.md.
+python run.py --phase 2 --search-fixture fixtures/search.json \
+    --out out/scratch/phase2.fixture.csv
 
 # Live, capped to 500 paid calls (key from .env)
 python run.py --phase 2 --results out/phase2.csv \

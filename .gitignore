@@ -29,6 +29,13 @@ logs/
 # root, which buried the one CSV this repo actually tracks.
 out/
 
+# Named for documentation rather than effect -- `out/` above already covers it.
+# The convention: `out/` holds deliverables, `out/scratch/` holds verification
+# runs, which produce files indistinguishable in shape from real output. Pass
+# `--out-dir out/scratch` for anything disposable, so the directory can be
+# emptied without reading filenames. See the Outputs section of README.md.
+out/scratch/
+
 # Chunk inputs. Regenerable from the sheet with tools/split_by_site.py;
 # tracking them would guarantee they go stale.
 chunks/
