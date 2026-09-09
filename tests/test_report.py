@@ -1,5 +1,6 @@
 """Coverage-report diagnosis tests. Hermetic — no network, no real run."""
 
+import csv
 import os
 import tempfile
 import unittest
@@ -7,7 +8,11 @@ import unittest
 from pipeline.catalog import Candidate
 from pipeline.load import CourseRow
 from pipeline.match import MatchResult
-from pipeline.report import write_coverage_report
+from pipeline.report import (OUTPUT_COLUMNS, PHASE_2_STATUSES,
+                             phase_for, write_coverage_report,
+                             write_filled_csv)
+from pipeline.search import SEARCH_FOUND
+from pipeline.triage import CARRIED_OVER
 
 URL = "https://x.ac.uk/courses/a/"
 
@@ -134,6 +139,81 @@ class TestDeadSeedReporting(unittest.TestCase):
             "X": {"candidates": 50, "strategy": "listing", "healthy": True,
                   "failure_reason": "", "seed_yield": {"https://x/": 50}}})
         self.assertNotIn("Seeds that yielded nothing", out)
+
+
+class TestPhaseColumn(unittest.TestCase):
+    """`phase` names which phase produced the delivered URL.
+
+    It carries nothing `matched_status` does not already carry -- across the
+    full sheet, every row phase 2 actually decided is `carried_over` or
+    `search_found`, with zero exceptions. It exists so a reader can filter
+    `phase == 2` without first learning that vocabulary, which makes the
+    invariant below the whole justification for the column: the moment it can
+    disagree with `matched_status`, it is a bug rather than a convenience.
+    """
+
+    URL = "https://courses.aber.ac.uk/undergraduate/data-science"
+
+    def test_every_phase_2_status_maps_to_2(self):
+        for status in PHASE_2_STATUSES:
+            self.assertEqual(phase_for(status, self.URL), "2", status)
+
+    def test_extraction_statuses_map_to_1(self):
+        for status in ("verified", "probable", "ambiguous", "url_dead"):
+            self.assertEqual(phase_for(status, self.URL), "1", status)
+
+    def test_a_row_with_no_url_is_blank_whatever_its_status(self):
+        """No URL means no phase delivered one; `1` would overstate it."""
+        for status in ("no_match", "no_catalog", "verified", "carried_over"):
+            self.assertEqual(phase_for(status, ""), "", status)
+            self.assertEqual(phase_for(status, "   "), "", status)
+
+    def test_an_unknown_status_is_treated_as_extraction(self):
+        self.assertEqual(phase_for("something_new", self.URL), "1")
+
+    def test_the_statuses_come_from_the_constants_not_literals(self):
+        """Renaming a status must not leave this mapping stale."""
+        self.assertEqual(set(PHASE_2_STATUSES), {CARRIED_OVER, SEARCH_FOUND})
+
+    def test_it_is_the_last_output_column(self):
+        self.assertEqual(OUTPUT_COLUMNS[-1], "phase")
+
+
+class TestPhaseNeverDisagreesWithStatus(unittest.TestCase):
+    """The invariant, over a written file rather than in the abstract."""
+
+    def written(self, results):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        path = os.path.join(d.name, "filled.csv")
+        write_filled_csv(results, path)
+        with open(path, encoding="utf-8", newline="") as fh:
+            return list(csv.DictReader(fh))
+
+    def result(self, rid, url, status):
+        row = CourseRow(rid, "Data Science BSc", "Aberystwyth",
+                        "https://www.aber.ac.uk")
+        cand = Candidate("Data Science", url, "ug") if url else None
+        # `url` is derived from the Candidate, not assignable.
+        return MatchResult(row=row, candidate=cand, score=0.9, margin=0.4,
+                           status=status)
+
+    def test_a_filled_extraction_row_is_phase_1(self):
+        got = self.written([self.result("1", TestPhaseColumn.URL, "confident")])
+        self.assertEqual(got[0]["matched_status"], "verified")
+        self.assertEqual(got[0]["phase"], "1")
+
+    def test_an_unfilled_row_is_blank(self):
+        got = self.written([self.result("1", "", "no_match")])
+        self.assertEqual(got[0]["phase"], "")
+
+    def test_no_written_row_can_contradict_its_status(self):
+        results = [self.result("1", TestPhaseColumn.URL, "confident"),
+                   self.result("2", TestPhaseColumn.URL, "probable"),
+                   self.result("3", "", "no_catalog")]
+        for row in self.written(results):
+            expected = phase_for(row["matched_status"], row["course_url"])
+            self.assertEqual(row["phase"], expected)
 
 
 if __name__ == "__main__":

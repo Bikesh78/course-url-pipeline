@@ -267,7 +267,7 @@ run args are persisted to the database. About
 20,700 rows are genuine search targets, roughly $21 at Serper rates. See
 [docs/PHASE-2.md](./docs/PHASE-2.md).
 
-### The outputs gain three columns
+### The outputs gain provenance columns
 
 `prior_course_url`, `prior_matched_status` and `url_change` — because the
 pipeline used to overwrite the sheet's URL and keep no record, silently altering
@@ -279,6 +279,14 @@ being read or made. What they mean and how to read them:
 `url_change` describes *that file's own* answer against the sheet, so a row may
 read `dropped` in `courses_filled.csv` and `unchanged` after Phase 2 restored
 it. Both are correct for the file they are in.
+
+A fourth column, `phase`, says which phase produced the delivered URL — `1` for
+extraction, `2` for a URL triage carried over or search found, and blank where
+no URL was delivered at all. It is **derived, not decided**: every row Phase 2
+actually decided is already `carried_over` or `search_found`, with zero
+exceptions across the sheet, so `phase` adds no information and exists only so
+that filtering `phase == 2` needs no knowledge of that vocabulary. It is
+recomputed at every write, so it cannot fall out of step with `matched_status`.
 
 **This is a schema change.** The columns are *appended*, so anything reading by
 column name is unaffected — but a consumer reading by column position will

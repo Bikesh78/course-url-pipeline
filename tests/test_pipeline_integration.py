@@ -388,9 +388,24 @@ class TestPhase1Provenance(unittest.TestCase):
         self.assertEqual(got[0]["url_change"], "added")
 
     def test_provenance_columns_are_appended_not_inserted(self):
-        """Reading by name stays safe; reading by position is at least honest."""
+        """Reading by name stays safe; reading by position is at least honest.
+
+        Asserted as "contiguous, after every original column" rather than
+        "the last three", so a later appended column does not read as a
+        regression -- what must never happen is one being *inserted* among the
+        columns that predate them.
+        """
         from pipeline.report import OUTPUT_COLUMNS, PROVENANCE_COLUMNS
-        self.assertEqual(OUTPUT_COLUMNS[-3:], PROVENANCE_COLUMNS)
+        first = OUTPUT_COLUMNS.index(PROVENANCE_COLUMNS[0])
+        self.assertEqual(OUTPUT_COLUMNS[first:first + len(PROVENANCE_COLUMNS)],
+                         PROVENANCE_COLUMNS)
+        for name in PROVENANCE_COLUMNS:
+            self.assertGreater(OUTPUT_COLUMNS.index(name),
+                               OUTPUT_COLUMNS.index("row_flags"))
+
+    def test_the_phase_column_is_last(self):
+        from pipeline.report import OUTPUT_COLUMNS
+        self.assertEqual(OUTPUT_COLUMNS[-1], "phase")
 
 
 class TestReviewQueueShowsEveryCandidate(unittest.TestCase):

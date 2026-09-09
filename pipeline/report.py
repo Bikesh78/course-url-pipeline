@@ -10,7 +10,8 @@ from collections import Counter, defaultdict
 from pipeline.catalog import describe_parser_tier
 from pipeline.load import INPUT_COLUMNS
 from pipeline.match import MatchResult
-from pipeline.triage import classify_change
+from pipeline.search import SEARCH_FOUND
+from pipeline.triage import CARRIED_OVER, classify_change
 
 # Provenance columns are appended, never inserted: a consumer reading by name
 # is unaffected, and one reading by position is at least not silently shifted.
@@ -27,9 +28,37 @@ PROVENANCE_COLUMNS = ["prior_course_url", "prior_matched_status", "url_change"]
 # new ignore rule.
 DEFAULT_OUT_DIR = "out"
 
+# Which phase produced the delivered URL. Carries no information that
+# `matched_status` does not already carry -- every row phase 2 actually decided
+# is `carried_over` or `search_found`, and across the full sheet there are zero
+# exceptions -- so this exists purely so a reader can filter `phase == 2`
+# without first learning that vocabulary.
+#
+# Imported rather than re-spelled, so renaming a status cannot leave this
+# mapping quietly pointing at a string nothing produces any more.
+PHASE_2_STATUSES = (CARRIED_OVER, SEARCH_FOUND)
+
+
+def phase_for(status: str, url: str) -> str:
+    """Which phase produced *url*: "2", "1", or "" when there is no URL.
+
+    Keyed on the URL rather than the status alone, because the question is
+    which phase *delivered an answer*: a `no_match` row has none, and calling
+    that phase 1 would claim extraction produced something it did not. Blank
+    for not-applicable is this file's existing idiom -- `match_margin` is blank
+    on a `search_found` row, `live_page_score` blank when unverified.
+
+    Derived at the moment of writing and never stored between, which is what
+    keeps a redundant column from drifting out of agreement with its source.
+    """
+    if not (url or "").strip():
+        return ""
+    return "2" if (status or "").strip() in PHASE_2_STATUSES else "1"
+
+
 OUTPUT_COLUMNS = INPUT_COLUMNS + ["match_margin", "live_page_score",
                                   "match_evidence", "row_flags"] + \
-    PROVENANCE_COLUMNS
+    PROVENANCE_COLUMNS + ["phase"]
 
 # The reviewer is choosing between candidates, so every candidate belongs here.
 # The sheet's own URL is frequently the best of them — on `ambiguous` rows a
@@ -81,6 +110,7 @@ def write_filled_csv(results: list[MatchResult], path: str) -> None:
                 row.prior_course_url,
                 (row.raw.get("matched_status") or "").strip(),
                 classify_change(row.prior_course_url, res.url),
+                phase_for(_status_for_csv(res), res.url),
             ])
 
 

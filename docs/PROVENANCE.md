@@ -29,6 +29,29 @@ several hundred rows out of `changed` and into `unchanged`.
 334 of the changed rows had replaced a working URL with one that returned 404,
 and nothing in the output said so.
 
+## `phase`
+
+| value | meaning |
+|---|---|
+| `1` | extraction from the institution's own site produced the URL |
+| `2` | Phase 2 produced it — triage carried it over, or search found it |
+| *(blank)* | no URL was delivered, so no phase produced one |
+
+**Derived, never decided.** `phase` is computed from `matched_status` and the
+presence of a URL at the moment a file is written, by one function
+(`report.phase_for`), and is never stored between. That matters because the
+column is redundant on purpose: measured across the full sheet, every row Phase
+2 actually decided carries `carried_over` or `search_found` and **zero** rows
+disagree, so `phase` tells you nothing new. It exists so that a reader filtering
+for Phase 2 results does not first have to learn which statuses those are.
+
+A redundant column earns its place only while it cannot contradict its source,
+which is why there is a single derivation point and a test asserting no written
+row can disagree. Blank rather than `1` for an unfilled row is the same
+reasoning: extraction did not deliver a URL there, and saying `1` would claim it
+did — blank for not-applicable matches `match_margin` on a `search_found` row
+and `live_page_score` when unverified.
+
 ## `url_change`
 
 | value | meaning |

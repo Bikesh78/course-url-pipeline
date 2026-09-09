@@ -36,8 +36,8 @@ from pipeline.load import (DEFAULT_INPUT, dedupe, group_by_site,
                            normalise_website, site_display_name)
 from pipeline.match import FLOOR, MatchResult, Thresholds, assign
 from pipeline.normalize import score as score_pair
-from pipeline.report import (DEFAULT_OUT_DIR, write_calibration_sample,
-                             write_coverage_report,
+from pipeline.report import (DEFAULT_OUT_DIR, phase_for,
+                             write_calibration_sample, write_coverage_report,
                              write_filled_csv, write_review_queue)
 
 CATALOG_DIR = "catalogs"
@@ -436,6 +436,14 @@ def run_phase2(args, run_id: str, log) -> int:
     # Counted after both stages, so the headline figure and `finish_run` cover
     # search adoptions as well as triage.
     after = sum(1 for r in rows if (r.get("course_url") or "").strip())
+
+    # Recomputed here rather than inherited: triage and search have changed
+    # statuses since phase 1 wrote the column, and recomputing also back-fills
+    # it for a result file produced before the column existed. One derivation
+    # point means the column cannot disagree with `matched_status`.
+    for r in rows:
+        r["phase"] = phase_for(r.get("matched_status", ""),
+                               r.get("course_url", ""))
 
     fields = list(rows[0].keys()) if rows else []
     with open(args.out, "w", encoding="utf-8", newline="") as fh:
