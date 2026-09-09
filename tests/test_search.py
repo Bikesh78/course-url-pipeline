@@ -34,20 +34,33 @@ class TestProviders(unittest.TestCase):
 
 
 class TestQuery(unittest.TestCase):
-    def test_the_course_name_is_quoted_as_a_phrase(self):
-        q = build_query("Diploma of Business", "ANT College", "ant.edu.au")
-        self.assertIn('"Diploma of Business"', q)
+    def test_the_query_is_the_name_scoped_to_the_site(self):
+        self.assertEqual(
+            build_query("Diploma of Business", "ANT College", "ant.edu.au"),
+            "Diploma of Business site:ant.edu.au")
 
-    def test_the_query_is_scoped_to_the_institution_site(self):
-        q = build_query("Diploma of Business", "ANT College", "ant.edu.au")
-        self.assertIn("site:ant.edu.au", q)
+    def test_the_name_is_not_quoted(self):
+        """Measured: the exact phrase halves usable yield (10/40 -> 5/40).
+
+        A site wording the course slightly differently returns nothing at all.
+        """
+        self.assertNotIn('"', build_query("Diploma of Business", "", "x.edu"))
+
+    def test_the_institution_is_not_included(self):
+        """Redundant after `site:`, and it is the legal name.
+
+        "A2 Education Pty Ltd" rarely appears in a course page's own text, so
+        including it filtered out real pages.
+        """
+        q = build_query("Diploma", "A2 Education Pty Ltd", "a2.edu.au")
+        self.assertNotIn("Pty Ltd", q)
 
     def test_whitespace_is_collapsed(self):
-        q = build_query("  Diploma   of  Business ", "", "x.edu.au")
-        self.assertIn('"Diploma of Business"', q)
+        self.assertEqual(build_query("  Diploma   of  Business ", "", "x.edu"),
+                         "Diploma of Business site:x.edu")
 
     def test_a_missing_site_still_produces_a_query(self):
-        self.assertIn('"X"', build_query("X", "Inst", ""))
+        self.assertEqual(build_query("X", "Inst", ""), "X")
 
 
 class TestOnSite(unittest.TestCase):
@@ -504,6 +517,79 @@ class TestTheRealTransport(unittest.TestCase):
 
         with unittest.mock.patch("urllib.request.urlopen", raiser):
             self.assertEqual(_post_json(SERPER_ENDPOINT, {}, {}), (500, {}))
+
+
+class TestInactiveRecordsAreNeverQueried(unittest.TestCase):
+    """The sheet retires a record by prefixing the *institution* name.
+
+    "(Inactive) Fleming College Toronto". Never the course name -- 0 course
+    names carry it against 72 institution names -- so the check has to look at
+    the institution.
+    """
+
+    def searchable(self, **over):
+        r = row("1", "Data Science")
+        r.update(over)
+        return is_searchable(r)
+
+    def test_an_active_record_is_searchable(self):
+        self.assertTrue(self.searchable(institution_name="Fleming College"))
+
+    def test_an_inactive_institution_is_not(self):
+        self.assertFalse(
+            self.searchable(institution_name="(Inactive) Fleming College"))
+
+    def test_the_marker_is_matched_case_insensitively(self):
+        self.assertFalse(
+            self.searchable(institution_name="(INACTIVE) Fleming College"))
+
+    def test_an_inactive_course_name_is_also_honoured(self):
+        """Defensive: this sheet does not use it, another might."""
+        self.assertFalse(self.searchable(name="(Inactive) Data Science"))
+
+    def test_no_paid_query_is_spent_on_one(self):
+        rows = [row("1", "Data Science")]
+        rows[0]["institution_name"] = "(Inactive) Aberystwyth"
+        stats, provider = run(rows, {query("Data Science"): [DS]})
+        self.assertEqual(provider.queries, [])
+        self.assertEqual((stats.queried, stats.adopted), (0, 0))
+
+
+class TestBatchRestriction(unittest.TestCase):
+    """`--search-ids` spends a fixed budget on a chosen sample."""
+
+    def rows(self):
+        return [row("1", "Data Science"), row("2", "Anthropology")]
+
+    def test_only_the_listed_ids_are_queried(self):
+        rows = self.rows()
+        provider = FixtureProvider({query("Data Science"): [DS],
+                                    query("Anthropology"): [ANTH]})
+        stats = search_rows(rows, provider, ShareIndex(rows),
+                            only_ids={"1"})
+        self.assertEqual(stats.queried, 1)
+        self.assertEqual(rows[0]["course_url"], DS)
+        self.assertEqual(rows[1]["course_url"], "")
+
+    def test_a_row_outside_the_batch_is_left_untouched(self):
+        rows = self.rows()
+        before = dict(rows[1])
+        search_rows(rows, FixtureProvider({query("Anthropology"): [ANTH]}),
+                    ShareIndex(rows), only_ids={"1"})
+        self.assertEqual(rows[1], before)
+
+    def test_the_batch_narrows_and_never_widens(self):
+        """An id in the batch that is not searchable stays skipped."""
+        rows = [row("1", "Data Science", url=DS, status="verified")]
+        _, provider = run(rows, {})
+        self.assertEqual(searchable_rows(rows, {"1"}), [])
+        self.assertEqual(provider.queries, [])
+
+    def test_an_unknown_id_in_the_batch_is_harmless(self):
+        rows = self.rows()
+        stats = search_rows(rows, FixtureProvider({}), ShareIndex(rows),
+                            only_ids={"nope"})
+        self.assertEqual(stats.queried, 0)
 
 
 if __name__ == "__main__":

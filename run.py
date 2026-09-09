@@ -8,6 +8,7 @@ the domain vocabulary.
 from __future__ import annotations
 
 import argparse
+import collections
 import concurrent.futures
 import dataclasses
 import json
@@ -25,15 +26,15 @@ from pipeline.catalog import (PARSER_TIER, SCHEMA_VERSION, Catalog,
                               page_heading, page_title)
 from pipeline.fetch import Fetcher, registrable
 from pipeline.logging_setup import set_current_site, setup_logging
-from pipeline.search import (SERPER_DELAY, FixtureProvider, NullProvider,
-                            SearchProviderError, SerperProvider, search_rows,
-                            searchable_rows)
+from pipeline.search import (SEARCH_FOUND, SERPER_DELAY, FixtureProvider,
+                            NullProvider, SearchProviderError, SerperProvider,
+                            search_rows, searchable_rows)
 from pipeline.store import DEFAULT_DB, Store, new_run_id
 from pipeline.triage import ShareIndex, triage_rows
 from pipeline.load import (DEFAULT_INPUT, dedupe, group_by_site,
                            load_rows,
                            normalise_website, site_display_name)
-from pipeline.match import MatchResult, Thresholds, assign
+from pipeline.match import FLOOR, MatchResult, Thresholds, assign
 from pipeline.normalize import score as score_pair
 from pipeline.report import (DEFAULT_OUT_DIR, write_calibration_sample,
                              write_coverage_report,
@@ -276,6 +277,48 @@ def process_site(fetcher: Fetcher, site_key: str, rows: list,
     return out, health
 
 
+def verify_search_rows(rows, fetcher, log, run_id: str) -> dict:
+    """Fetch each search-adopted URL and score the live page against the name.
+
+    The same independent evidence phase 1's `verify` collects: the Candidate
+    name there comes from a listing anchor, here from a search result, and in
+    both cases the page's own `<h1>`/`<title>` is the check. Costs no API money
+    -- only the per-domain politeness delay.
+
+    **A failed fetch is recorded, not treated as a wrong answer.** These rows
+    are on Sites extraction could not read, and on a `blocked` Site a 403 says
+    nothing about whether the URL is right. Dropping them would discard
+    possibly-correct answers and would repeat the conflation `fd94963` fixed
+    for extraction diagnosis, so the URL and its `search_found` status stay and
+    the outcome is reported instead. What to deliver is then a decision made
+    with the numbers rather than baked in here.
+    """
+    counts = collections.Counter()
+    for r in rows:
+        url = (r.get("course_url") or "").strip()
+        if not url:
+            continue
+        page = fetcher.get(url)
+        if page.status != 200 or not page.text:
+            counts[f"http_{page.status}"] += 1
+            r["row_flags"] = ";".join(
+                f for f in [r.get("row_flags", ""),
+                            f"search_verify_http_{page.status}"] if f)
+            continue
+        heading = page_heading(page.text) or page_title(page.text)
+        live = score_pair(r.get("name", ""), heading,
+                          r.get("institution_name", ""))
+        r["live_page_score"] = f"{live:.4f}"
+        counts["fetched"] += 1
+        counts["live_ge_floor" if live >= FLOOR else "live_below_floor"] += 1
+        log.debug(f"verify-search {live:.3f} {url}",
+                  extra={"event": "search.verify", "run_id": run_id,
+                         "course_id": r["id"], "url": url,
+                         "live_score": round(live, 4),
+                         "heading": heading[:120]})
+    return counts
+
+
 def build_provider(args):
     """The search provider this run should use.
 
@@ -341,10 +384,19 @@ def run_phase2(args, run_id: str, log) -> int:
                     "rejected_gate": stats.rejected_by_gate,
                     "rejected_sharing": stats.rejected_by_sharing})
 
-    eligible = len(searchable_rows(rows))
+    only_ids = None
+    if args.search_ids:
+        with open(args.search_ids, encoding="utf-8") as fh:
+            only_ids = {line.strip() for line in fh if line.strip()}
+        log.info(f"search: restricted to {len(only_ids)} ids from "
+                 f"{args.search_ids}",
+                 extra={"run_id": run_id, "search_batch": args.search_ids,
+                        "search_batch_size": len(only_ids)})
+
+    eligible = len(searchable_rows(rows, only_ids))
     # A broken vendor must not cost us triage's work: the stage stops itself,
     # the run says so, and the file is still written with what Stage 1 decided.
-    ss = search_rows(rows, provider, index)
+    ss = search_rows(rows, provider, index, only_ids=only_ids)
     aborted = ""
     if ss.aborted:
         aborted = f"; ABORTED: {ss.aborted}"
@@ -367,6 +419,19 @@ def run_phase2(args, run_id: str, log) -> int:
                     "search_rejected_sharing": ss.rejected_by_sharing,
                     "provider": type(provider).__name__,
                     "search_aborted": bool(aborted)})
+
+    if args.verify_search and ss.adopted:
+        adopted = [r for r in rows if r.get("matched_status") == SEARCH_FOUND]
+        fetcher = Fetcher(delay=args.delay, offline=args.offline)
+        vc = verify_search_rows(adopted, fetcher, log, run_id)
+        log.info(f"verify-search: {vc['fetched']} of {len(adopted)} adopted "
+                 f"URLs fetched 200 "
+                 f"({vc['live_ge_floor']} scored >= {FLOOR} against the "
+                 f"course name, {vc['live_below_floor']} below); "
+                 + ", ".join(f"{n}x {k}" for k, n in sorted(vc.items())
+                             if k.startswith("http_")),
+                 extra={"run_id": run_id, **{f"verify_{k}": v
+                                             for k, v in vc.items()}})
 
     # Counted after both stages, so the headline figure and `finish_run` cover
     # search adoptions as well as triage.
@@ -391,7 +456,13 @@ def run_phase2(args, run_id: str, log) -> int:
     log.info(f"wrote {args.out} ({len(rows)} rows, {after} filled "
              f"= {100 * after / max(1, len(rows)):.1f}%, was "
              f"{100 * before / max(1, len(rows)):.1f}%)")
-    for k, v in stats.changes.most_common():
+    # Recounted from the rows, not taken from `TriageStats`: that counter is a
+    # snapshot from before search ran, so reporting it hid every row search
+    # filled -- a 500-row trial printed triage's tally unchanged while the file
+    # correctly recorded 97 rows moving none -> added and 34 dropped -> changed.
+    delivered = collections.Counter(
+        (r.get("url_change") or "").strip() for r in rows)
+    for k, v in delivered.most_common():
         log.info(f"  url_change {k:10s} {v:6d}")
 
     # The output is written and valid either way — triage's work is not thrown
@@ -479,6 +550,13 @@ def build_parser() -> argparse.ArgumentParser:
                     choices=("null", "serper"),
                     help="phase 2: search vendor. 'serper' spends real money "
                          "and reads its key from $SERPER_API_KEY")
+    ap.add_argument("--search-ids", default=None,
+                    help="phase 2: file of course ids, one per line, to "
+                         "restrict search to; see "
+                         "tools/sample_search_targets.py")
+    ap.add_argument("--verify-search", action="store_true",
+                    help="phase 2: fetch each search-adopted URL and score "
+                         "the live page against the course name")
     ap.add_argument("--search-limit", type=int, default=None,
                     help="phase 2: cap paid search calls for this run, so a "
                          "live vendor can be tried on part of the sheet")

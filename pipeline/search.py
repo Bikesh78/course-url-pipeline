@@ -58,6 +58,13 @@ from pipeline.triage import ShareIndex, classify_change, gate_score
 # Flags marking rows for which no course page can exist.
 UNSEARCHABLE_FLAGS = ("occupation_code_not_course", "year_level_not_course")
 
+# The sheet marks a retired record by prefixing the *institution* name --
+# "(Inactive) Fleming College Toronto". Never the course name: 0 course names
+# carry it against 72 institution names. Only 28 of the 20,706 searchable rows
+# are affected, so this is about not paying for a record the source itself has
+# retired rather than about the money.
+INACTIVE_MARKER = "(inactive)"
+
 MAX_RESULTS = 5
 
 # A search result is never `verified`: verification means we fetched the page
@@ -293,16 +300,32 @@ class SerperProvider:
 
 
 def build_query(name: str, institution: str, site: str) -> str:
-    """The query string for one course.
+    """The query string for one course: the name, scoped to the Site.
 
-    Quotes the course name so the engine treats it as a phrase, and scopes to
-    the Institution's own host — a course page on an aggregator is not an
-    answer, and the domain check downstream would drop it anyway.
+    Neither quoted nor institution-qualified, and both omissions are measured
+    rather than assumed. Against 40 rows of the first trial batch, asking for
+    the exact phrase *and* naming the institution returned a result that
+    cleared the 0.55 gate for **5 of 40** rows; the bare name scoped with
+    `site:` cleared it for **10 of 40**. Twice the usable yield.
+
+    Why each hurt:
+
+    * **The phrase quotes** demand the site word the course exactly as the
+      sheet does. "Certificate IV in Engineering" quoted against a small RTO
+      returns nothing at all, though the course is there under another
+      spelling.
+    * **The institution name** is redundant once `site:` has scoped the query,
+      and it is the *legal* name — "A2 Education Pty Ltd" — which rarely
+      appears in a course page's own text, so it filters out real pages.
+
+    Recall is the engine's job and precision is ours: every on-site result in
+    that measurement passed the domain check, so `gate_score` and the floor did
+    all the filtering. Letting the engine be generous and staying strict
+    afterwards is the same division of labour the module docstring describes —
+    a hit is a Candidate, not an answer.
     """
     name = re.sub(r"\s+", " ", (name or "").strip())
-    parts = [f'"{name}"' if name else ""]
-    if institution:
-        parts.append(re.sub(r"\s+", " ", institution.strip()))
+    parts = [name]
     if site:
         parts.append(f"site:{site}")
     return " ".join(p for p in parts if p)
@@ -311,18 +334,33 @@ def build_query(name: str, institution: str, site: str) -> str:
 def is_searchable(row: dict) -> bool:
     """Is this row worth spending a paid query on?
 
-    False for rows already filled, and for rows whose flags say no course page
-    can exist.
+    False for rows already filled, for rows whose flags say no course page can
+    exist, and for records the sheet has marked `(Inactive)`.
     """
     if (row.get("course_url") or "").strip():
         return False
     flags = row.get("row_flags") or ""
-    return not any(f in flags for f in UNSEARCHABLE_FLAGS)
+    if any(f in flags for f in UNSEARCHABLE_FLAGS):
+        return False
+    # Checked on the course name too, defensively: the marker is on the
+    # institution in this sheet, but it costs nothing to honour either.
+    return not any(INACTIVE_MARKER in (row.get(f) or "").lower()
+                   for f in ("institution_name", "name"))
 
 
-def searchable_rows(rows: list[dict]) -> list[dict]:
-    """The subset of *rows* a search vendor would be asked about."""
-    return [r for r in rows if is_searchable(r)]
+def searchable_rows(rows: list[dict],
+                    only_ids: set[str] | None = None) -> list[dict]:
+    """The subset of *rows* a search vendor would be asked about.
+
+    `only_ids` restricts the result to one batch of course ids, so a trial can
+    spend a fixed budget on a chosen sample -- see
+    `tools/sample_search_targets.py`. It narrows, never widens: a row in the
+    batch that is not searchable on its own terms is still skipped.
+    """
+    picked = [r for r in rows if is_searchable(r)]
+    if only_ids is None:
+        return picked
+    return [r for r in picked if r["id"] in only_ids]
 
 
 def on_site(url: str, site: str) -> bool:
@@ -358,7 +396,8 @@ class SearchStats:
 
 
 def search_rows(rows: list[dict], provider: SearchProvider,
-                index: ShareIndex, floor: float = FLOOR) -> SearchStats:
+                index: ShareIndex, floor: float = FLOOR,
+                only_ids: set[str] | None = None) -> SearchStats:
     """Fill still-empty rows from search results, in place, as Candidates.
 
     Every hit clears four independent checks before it is written, and the
@@ -380,7 +419,7 @@ def search_rows(rows: list[dict], provider: SearchProvider,
     """
     stats = SearchStats()
 
-    for r in searchable_rows(rows):
+    for r in searchable_rows(rows, only_ids):
         site = _host_of(r.get("website", ""))
         if not site:
             continue

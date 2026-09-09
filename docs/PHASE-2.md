@@ -146,6 +146,80 @@ python run.py --phase 2 --results out/phase2.csv \
 | `--search-fixture` | canned results; wins over `--search-provider` |
 | `--env-file` | where to read `KEY=value` lines from (default `.env`) |
 | `--out` | defaults to `out/phase2.csv` — deliberately *not* the phase 1 name, so a bare `--phase 2` cannot overwrite the result file it reads |
+| `--search-ids` | file of course ids to restrict search to; see `tools/sample_search_targets.py` |
+| `--verify-search` | fetch each adopted URL and score the live page against the course name |
+
+## A measured trial, and what it found
+
+500 rows sampled from the courses phase 1 could not crawl — 400 from sites that
+failed only for want of a listing hub, 100 from sites that refused the crawler —
+one row per site across 483 sites. Cost $0.50.
+
+```bash
+uv run python tools/sample_search_targets.py --diagnosis no_hub  --limit 400 \
+    --out out/search_batch.001.txt
+uv run python tools/sample_search_targets.py --diagnosis blocked --limit 100 \
+    --append out/search_batch.001.txt
+uv run python run.py --phase 2 --out out/phase2.searched.csv \
+    --search-provider serper --search-ids out/search_batch.001.txt \
+    --verify-search --db ''
+```
+
+**131 of 500 adopted (26%)**: 0 rejected off-site, 216 failed the 0.55 gate, 6
+refused by the sharing rule, 147 returned nothing. Not one on-site result was
+rejected by the domain check, so `site:` does that job completely and the gate
+does all the filtering.
+
+Fetching those 131 splits them sharply by *why* phase 1 failed:
+
+| cohort | queried | adopted | fetched 200 | live score >= 0.55 | refused 403 |
+|---|---|---|---|---|---|
+| `no_hub` | 400 | 80 (20%) | 51 | **39** | 17 |
+| `blocked` | 100 | 51 (51%) | 2 | 1 | 48 |
+
+Two things follow, and they pull in opposite directions:
+
+- **Where a page can be fetched, search is accurate.** 39 of the 51 `no_hub`
+  URLs that returned 200 also matched the course name on the page itself — 76%
+  confirmed by evidence independent of the search ranking.
+- **Search is most productive exactly where it cannot be checked.** Blocked
+  sites yielded adoptions at 51%, more than twice the `no_hub` rate — they are
+  large, well-indexed institutions whose pages are easy to find and whose
+  crawler policy refuses us. 48 of 51 then returned 403 to a direct fetch, so
+  the evidence that would confirm them is unavailable *by construction*, not by
+  accident.
+
+A 403 is therefore not a wrong answer, and these rows keep their URL and their
+`search_found` status with a `search_verify_http_403` flag rather than being
+discarded. Deciding whether to deliver unverifiable URLs is a judgement about
+this dataset, not something the pipeline should silently make.
+
+### Why the query is bare
+
+`build_query` sends the course name scoped with `site:` and nothing else. The
+first live probe returned **zero results for all 10 rows**, and the cause was
+the query, not the parsing: asking for the exact phrase *and* naming the
+institution cleared the gate for 5 of 40 rows, while the bare name scoped by
+`site:` cleared it for 10 of 40. Twice the yield. The phrase quotes demand the
+site word a course exactly as the sheet does, and the institution's *legal*
+name — "A2 Education Pty Ltd" — rarely appears in a course page's own text.
+
+### Continuing from a trial
+
+Two independent mechanisms, so a good result can be extended without redoing
+or re-paying for anything:
+
+```bash
+# batch 2, guaranteed disjoint from batch 1
+uv run python tools/sample_search_targets.py --diagnosis no_hub --limit 400 \
+    --exclude out/search_batch.001.txt --out out/search_batch.002.txt
+```
+
+and the response cache: re-running batch 1 reports `0 paid calls, 500 from
+cache` and reproduces all 131 adoptions exactly. `out/phase2.searched.csv` is
+therefore always regenerable from the phase 1 output plus `.cache/serper/`, and
+grows as batches accumulate. Phase 1's own file is only ever read — it still
+holds 24,294 filled rows, unchanged.
 
 Exit codes: `0` normal, `2` the provider could not be built (no key), `3` the
 search stage aborted on the vendor mid-run. A `3` still writes the output file
