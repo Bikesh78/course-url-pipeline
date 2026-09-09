@@ -122,12 +122,19 @@ class TestUrlHistory(StoreCase):
         self.assertEqual(len(self.store.history_for("1")), 1)
 
     def test_a_changed_url_is_appended_and_counted_as_drift(self):
+        """Drift is measured against the sheet, so the sheet must have one.
+
+        Previously this passed by comparing against the last row written,
+        which is what made the database disagree with the CSV.
+        """
         r1 = new_run_id()
         self.store.start_run(r1, "x.csv", {})
         self.store.record_results(r1, [result()])
         r2 = new_run_id()
         self.store.start_run(r2, "x.csv", {})
-        changed = self.store.record_results(r2, [result(url=DS_NEW)])
+        moved = result(url=DS_NEW)
+        moved.row.prior_course_url = DS
+        changed = self.store.record_results(r2, [moved])
         self.assertEqual(changed, 1)
         hist = self.store.history_for("1")
         self.assertEqual([h["url"] for h in hist], [DS, DS_NEW])
@@ -218,7 +225,8 @@ class TestDictHistoryPath(StoreCase):
             [{"id": "1", "course_url": DS, "processed_date": "2026-06-24"}])
         changed = self.store.record_url_rows(
             rid, [{"id": "1", "course_url": DS_NEW,
-                   "matched_status": "verified"}])
+                   "matched_status": "verified",
+                   "prior_course_url": DS}])
         self.assertEqual(changed, 1)
         self.assertEqual([h["url"] for h in self.store.history_for("1")],
                          [DS, DS_NEW])
@@ -278,6 +286,120 @@ class TestResultPersistence(StoreCase):
             self.assertEqual(len(s2.history_for("1")), 1)
         finally:
             s2.close()
+
+
+DS_SLASH = DS + "/"
+DS_WWW = DS.replace("https://courses.", "https://www.courses.")
+
+
+def sheet(course_id="1", url=DS, date="2026-06-24"):
+    """One input-sheet row, as `seed_baseline` reads them."""
+    return {"id": course_id, "course_url": url, "processed_date": date}
+
+
+def out_row(course_id="1", url=DS, prior=DS, status="verified"):
+    """One output-CSV row, as `record_url_rows` reads them.
+
+    `prior_course_url` is the column phase 1 and phase 2 both write; drift is
+    measured against it, so a test that omits it is not testing what runs.
+    """
+    return {"id": course_id, "course_url": url, "matched_status": status,
+            "prior_course_url": prior}
+
+
+class TestDriftIsMeasuredAgainstTheSheet(StoreCase):
+    """Drift answers "does this differ from what the sheet delivered".
+
+    Not "from the last row we happened to write". `seed_baseline` stamps the
+    sheet's rows with the sheet's own `processed_date` (June/July) while phase
+    1 stamps its own with the time it ran (September), so "the most recent
+    row" is phase 1's answer — which is what made the database disagree with
+    the CSV, 10,522 against 8,194.
+    """
+
+    def _phase1_then_phase2(self, phase1_url, phase2_url, prior=DS):
+        r1 = new_run_id()
+        self.store.start_run(r1, "x.csv", {})
+        self.store.seed_baseline([sheet(url=prior)])
+        self.store.record_results(r1, [result(url=phase1_url)])
+        r2 = new_run_id()
+        self.store.start_run(r2, "x.csv", {})
+        return self.store.record_url_rows(
+            r2, [out_row(url=phase2_url, prior=prior)])
+
+    def test_restoring_the_sheets_url_after_phase_1_changed_it_is_not_drift(self):
+        """The production shape, and the case that was being miscounted.
+
+        Phase 1 found something else, triage adopted the sheet's URL back, so
+        the delivered answer equals what the sheet delivered. `url_change`
+        reads `unchanged`; drift must agree.
+        """
+        self.assertEqual(self._phase1_then_phase2(DS_NEW, DS), 0)
+
+    def test_a_genuine_change_from_the_sheet_is_still_drift(self):
+        self.assertEqual(self._phase1_then_phase2(DS_NEW, DS_NEW), 1)
+
+    def test_a_trailing_slash_is_not_drift_through_the_results_path(self):
+        """`record_results` did not canonicalise; only the dict path did."""
+        self.assertEqual(self._phase1_then_phase2(DS_SLASH, DS_SLASH), 0)
+
+    def test_a_www_prefix_is_not_drift(self):
+        self.assertEqual(self._phase1_then_phase2(DS_WWW, DS_WWW), 0)
+
+    def test_filling_a_row_the_sheet_left_blank_is_not_drift(self):
+        """That is `added`, not `changed` — mixing them is the bug."""
+        rid = new_run_id()
+        self.store.start_run(rid, "x.csv", {})
+        self.assertEqual(self.store.record_url_rows(
+            rid, [out_row(url=DS, prior="")]), 0)
+
+    def test_the_results_path_measures_against_the_sheet_too(self):
+        """Phase 1 reads the sheet's URL off the raw input row."""
+        rid = new_run_id()
+        self.store.start_run(rid, "x.csv", {})
+        r = result(url=DS_NEW)
+        r.row.prior_course_url = DS
+        self.assertEqual(self.store.record_results(rid, [r]), 1)
+
+    def test_the_results_path_reports_no_drift_when_it_agrees_with_the_sheet(self):
+        rid = new_run_id()
+        self.store.start_run(rid, "x.csv", {})
+        r = result(url=DS_SLASH)
+        r.row.prior_course_url = DS
+        self.assertEqual(self.store.record_results(rid, [r]), 0)
+
+
+class TestNoSamePageDuplicates(StoreCase):
+    """One canonical row per page, whichever phase wrote it.
+
+    9,338 rows in the live database were slash-variants of a row the same
+    course already held, because phase 1 wrote URLs as extracted and phase 2
+    canonicalised them.
+    """
+
+    def test_a_slash_variant_creates_no_second_row(self):
+        r1 = new_run_id()
+        self.store.start_run(r1, "x.csv", {})
+        self.store.record_results(r1, [result(url=DS_SLASH)])
+        r2 = new_run_id()
+        self.store.start_run(r2, "x.csv", {})
+        self.store.record_url_rows(r2, [out_row(url=DS, prior=DS)])
+        self.assertEqual(len(self.store.history_for("1")), 1)
+
+    def test_the_stored_url_is_canonical(self):
+        rid = new_run_id()
+        self.store.start_run(rid, "x.csv", {})
+        self.store.record_results(rid, [result(url=DS_SLASH)])
+        self.assertEqual(self.store.history_for("1")[0]["url"], DS)
+
+    def test_a_genuinely_different_url_still_appends(self):
+        r1 = new_run_id()
+        self.store.start_run(r1, "x.csv", {})
+        self.store.record_results(r1, [result(url=DS)])
+        r2 = new_run_id()
+        self.store.start_run(r2, "x.csv", {})
+        self.store.record_url_rows(r2, [out_row(url=DS_NEW, prior=DS)])
+        self.assertEqual(len(self.store.history_for("1")), 2)
 
 
 if __name__ == "__main__":

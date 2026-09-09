@@ -6,7 +6,9 @@ Why this stage exists
 28,835 rows. Phase 1 re-derived every row independently, so for many courses
 there are now *two* candidate answers. Choosing between them is worth doing:
 measured across the whole sheet, taking the better of the two raises fill from
-**46.1% to 54.0%**.
+**46.1% to 51.1%** -- 3,974 adoptions. An earlier estimate of 54.0% predated the
+sharing check below, which refuses ~1,974 adoptions that would file one page
+against unrelated courses; 51.1% is the measured figure.
 
 Why a quality gate rather than a status rule
 --------------------------------------------
@@ -109,7 +111,7 @@ def _page_identity(url: str) -> tuple[str, str, str]:
     return (host, parts.path, parts.query)
 
 
-def _same_page(a: str, b: str) -> bool:
+def same_page(a: str, b: str) -> bool:
     """Do two URLs address the same page?
 
     Trailing slash, fragment, tracking parameters, scheme and a `www.` prefix
@@ -131,7 +133,7 @@ def classify_change(prior: str, final: str) -> str:
         return "added"
     if not final:
         return "dropped"
-    return "unchanged" if _same_page(prior, final) else "changed"
+    return "unchanged" if same_page(prior, final) else "changed"
 
 
 def _sharing_would_break(url: str, name: str, holders: dict[str, list[str]],
@@ -150,27 +152,54 @@ def _sharing_would_break(url: str, name: str, holders: dict[str, list[str]],
     return not all(are_variant_siblings(name, names[rid]) for rid in current)
 
 
+class ShareIndex:
+    """Which URLs are held by which Course Rows, scoped per Site.
+
+    Both adoption stages need this and they need the *same instance*: a URL
+    triage carried over is a holder by the time search runs, and letting two
+    courses take one search hit would reimport the collapse ADR-0004 exists to
+    prevent. Assignment scopes Share Groups per Site, so this does too.
+    """
+
+    def __init__(self, rows: list[dict]):
+        self.by_site: dict[str, dict[str, list[str]]] = (
+            collections.defaultdict(lambda: collections.defaultdict(list)))
+        self.names: dict[str, str] = {}
+        for r in rows:
+            self.names[r["id"]] = r.get("name", "")
+            url = (r.get("course_url") or "").strip()
+            if url:
+                self.by_site[_host_of(r.get("website", ""))][url].append(r["id"])
+
+    def would_break(self, site: str, url: str, name: str) -> bool:
+        """Would filing *url* against *name* break the sharing rule on *site*?"""
+        return _sharing_would_break(url, name, self.by_site[site], self.names)
+
+    def move(self, site: str, old_url: str, new_url: str, rid: str) -> None:
+        """Reassign *rid* from *old_url* to *new_url*, so later rows see it."""
+        holders = self.by_site[site]
+        if old_url and rid in holders.get(old_url, ()):
+            holders[old_url].remove(rid)
+        holders[new_url].append(rid)
+
+
 def triage_rows(rows: list[dict], source: dict[str, dict],
-                floor: float = FLOOR) -> TriageStats:
+                floor: float = FLOOR,
+                index: "ShareIndex | None" = None) -> TriageStats:
     """Apply prior-URL triage to output rows in place, and record provenance.
 
     `rows` are output-CSV dicts; `source` maps course id to the input sheet's
     row. Both the URL decision and the `url_change` column are set here, and in
     that order — provenance describes the *delivered* result, so a row triage
     restores reads `unchanged` rather than `dropped`.
+
+    `index` is the shared `ShareIndex`. Pass the one the search stage will also
+    use, so a URL adopted here is a holder there; omitted, one is built for
+    this call alone.
     """
     stats = TriageStats()
-
-    # Share Groups are per-Site, so the sharing check is scoped the same way
-    # Assignment scopes it.
-    by_site: dict[str, dict[str, list[str]]] = collections.defaultdict(
-        lambda: collections.defaultdict(list))
-    names: dict[str, str] = {}
-    for r in rows:
-        names[r["id"]] = r.get("name", "")
-        url = (r.get("course_url") or "").strip()
-        if url:
-            by_site[_host_of(r.get("website", ""))][url].append(r["id"])
+    if index is None:
+        index = ShareIndex(rows)
 
     for r in rows:
         src = source.get(r["id"], {})
@@ -203,7 +232,7 @@ def triage_rows(rows: list[dict], source: dict[str, dict],
                     adopt_reason = "dead"
                 elif (status in WEAK_STATUSES
                       and prior_status in TRUSTED_PRIOR
-                      and not _same_page(prior, ours)
+                      and not same_page(prior, ours)
                       and g_prior > gate_score(name, ours, inst)):
                     adopt_reason = "weak"
             elif not ours or status == DEAD_STATUS:
@@ -214,8 +243,7 @@ def triage_rows(rows: list[dict], source: dict[str, dict],
 
         if adopt_reason:
             site = _host_of(r.get("website", ""))
-            holders = by_site[site]
-            if _sharing_would_break(clean_url(prior), name, holders, names):
+            if index.would_break(site, clean_url(prior), name):
                 stats.rejected_by_sharing += 1
                 r.setdefault("row_flags", "")
                 r["row_flags"] = ";".join(
@@ -224,12 +252,8 @@ def triage_rows(rows: list[dict], source: dict[str, dict],
                 adopt_reason = None
 
         if adopt_reason:
-            if ours:
-                holders_old = by_site[_host_of(r.get("website", ""))]
-                if ours in holders_old and r["id"] in holders_old[ours]:
-                    holders_old[ours].remove(r["id"])
             canonical = clean_url(prior)
-            by_site[_host_of(r.get("website", ""))][canonical].append(r["id"])
+            index.move(_host_of(r.get("website", "")), ours, canonical, r["id"])
             r["course_url"] = canonical
             r["matched_status"] = CARRIED_OVER
             r["matched_score"] = f"{gate_score(name, prior, inst):.4f}"

@@ -28,6 +28,7 @@ from patterns.
 | when two courses may share a URL | [docs/adr/0004-bounded-url-sharing.md](./docs/adr/0004-bounded-url-sharing.md) |
 | why results live in SQLite too | [docs/adr/0005-sqlite-for-run-state-and-url-history.md](./docs/adr/0005-sqlite-for-run-state-and-url-history.md) |
 | why crawling is per-site, not per-institution | [docs/adr/0006-the-crawl-unit-is-a-website-not-an-institution.md](./docs/adr/0006-the-crawl-unit-is-a-website-not-an-institution.md) |
+| why the environment is pinned, and what an undeclared one cost | [docs/adr/0008](./docs/adr/0008-pinned-environment.md) |
 
 ## Guarantees
 
@@ -36,8 +37,11 @@ from patterns.
 - **A URL shared by two Course Rows always means one course in several
   variants.** Sharing requires a matching Variant Stem and Award class, and is
   capped; anything else is refused and recorded (ADR-0004).
-- **No paid API, no LLM, no `pip install`** — stdlib plus the already-present
-  `bs4`/`lxml` (ADR-0003).
+- **Phase 1 spends nothing: no paid API and no LLM** — Verification is string
+  work, not judgement (ADR-0003). Paid capability is a plug-in, opt-in by name:
+  Phase 2's search vendor does nothing unless `--search-provider` asks for it.
+  Runs on the standard library; `bs4` and `lxml` are used when installed and
+  fall back to `html.parser` when not.
 - **Every stage is resumable.** All HTTP responses are cached under `.cache/`,
   and extracted Catalogs under `catalogs/`. An interrupted run resumes free.
 - **Results survive a kill.** Each Site's rows are written to `pipeline.db` as
@@ -49,8 +53,33 @@ from patterns.
 
 ## Requirements
 
-Python 3.10+. `bs4` and `lxml` are used where present and degraded to stdlib
-`re` parsing where not.
+Python 3.10 (`>=3.10,<3.11`), with `beautifulsoup4` and `lxml` pinned in
+`pyproject.toml` and locked in `uv.lock`.
+
+```bash
+uv sync --python /usr/bin/python3.10   # or any CPython 3.10
+uv run python run.py --dry-run
+uv run python -m unittest discover -s tests -t . -q     # or: uv run pytest -q
+```
+
+**Running with a bare `python3` still works**, and needs no install step if
+`bs4` and `lxml` happen to be present. But extraction has three tiers —
+`lxml`, then `html.parser`, then a regex fallback — and coverage numbers are
+only comparable within a tier, so every run now prints which one it got and
+records it in `coverage_report.md`:
+
+```
+HTML parser: lxml (full extraction)
+```
+
+Anything else is a warning. The versions are pinned to the ones that produced
+this repo's committed figures rather than to current releases; see
+[docs/adr/0008](./docs/adr/0008-pinned-environment.md) for why the environment
+was undeclared, and what that cost.
+
+`uv` may warn that it cannot inspect `~/.pyenv/shims/python`, or that
+`/usr/bin/python3.9` lacks `distutils`. Both are interpreter-discovery noise
+and affect nothing.
 
 ## Usage
 
@@ -222,13 +251,21 @@ python run.py --phase 2 --results courses_filled.csv --out phase2.csv
 
 **Triage** chooses between our URL and the one the source sheet already had,
 using a quality gate rather than either pipeline's confidence label. Fill rises
-**46.1% → 51.0%**. Full reasoning and the measurement behind it:
+**46.1% → 51.1%**. Full reasoning and the measurement behind it:
 [docs/adr/0007](./docs/adr/0007-gated-prior-url-adoption.md).
 
-**Search fallback** is built but **inert until a vendor is configured** — the
-default provider returns nothing, so the stage reports zero results rather than
-failing. About 19,000 rows are genuine search targets, roughly $19 at Serper
-rates. See [docs/PHASE-2.md](./docs/PHASE-2.md).
+**Search fallback** is implemented — a hit is scored, held to the same 0.55
+floor, sharing-checked and only then written, and the *best-scoring* hit wins
+rather than the first, because a ranking is evidence about the search engine
+rather than about the course. Serper is wired in as the vendor, **opt-in by
+name** (`--search-provider serper`) so no run spends by accident; the default
+returns nothing and leaves every row untouched. Responses are cached under
+`.cache/serper/`, a rejected key raises rather than returning 20,706 quiet
+misses, and `--search-limit` caps a run. The key comes from a git-ignored `.env`
+(copy `.env.example`) or from the environment, and never from a flag, because
+run args are persisted to the database. About
+20,700 rows are genuine search targets, roughly $21 at Serper rates. See
+[docs/PHASE-2.md](./docs/PHASE-2.md).
 
 ### The outputs gain three columns
 
@@ -248,7 +285,8 @@ column name is unaffected — but a consumer reading by column position will
 break.
 
 `matched_status` gains `carried_over`, for a row whose URL came from the sheet
-rather than from extraction.
+rather than from extraction, and `search_found`, for one that came from a search
+result — scored and sharing-checked, but never fetched, so never `verified`.
 
 ## Outputs
 

@@ -27,3 +27,32 @@ Sites — is deliberately shaped as a plug-in behind the Catalog ladder and the
 Assignment adjudication hook, so enabling it later is configuration rather than
 a rewrite. The decision to spend is deferred until `coverage_report.md` says
 what the gap actually is.
+
+## Clarification (2026-09-09)
+
+The decision above stands unchanged; this note records what it governs, because
+the title's "stdlib-only" and the phrase "installs nothing" in Consequences have
+been read together as a blanket ban on third-party packages, which was never the
+intent. The title is left as written — it describes what Phase 1 in fact needs —
+but it is a description, not a prohibition.
+
+What this ADR rules out is **paid and nondeterministic services in Phase 1** — a
+search API, an LLM — for the reasons argued above: they cost money to reach a
+worse result, and they would make the coverage number an estimate rather than a
+measured fact.
+
+It does not rule out ordinary pure-Python libraries. It never did: `bs4` and
+`lxml` were already in use when this was written, behind `try/except
+ImportError` with a stdlib fallback, and remain compatible with it.
+
+Phase 2's `SerperProvider` is likewise **not** an exception to this ADR but the
+plug-in it anticipated ("search fallback for the long tail ... deliberately
+shaped as a plug-in ... so enabling it later is configuration rather than a
+rewrite"). It is opt-in by name, so Phase 1's guarantee is intact: no run spends
+anything unless `--search-provider serper` asks it to.
+
+A future dependency is therefore a normal engineering choice to argue on its
+merits, not a decision this ADR forecloses. `SERPER_API_KEY` loading was
+written against the standard library for its own reasons — a credential file
+that can interpolate is one whose effective value has to be traced rather than
+read — and not because a package was unavailable.

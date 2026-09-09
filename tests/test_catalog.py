@@ -1,16 +1,18 @@
 """Catalog extraction unit tests. Hermetic — no network."""
 
 import unittest
+import unittest.mock
 
 import pipeline.catalog as catalog_module
 
 from pipeline.fetch import FetchResult
 from pipeline.catalog import (
     build_catalog,
-    HUB_PATHS, SCHEMA_VERSION, Candidate, Catalog, _AUTH_PATH,
-    _drop_institution_names, _slug_to_name,
-    classify_probes, clean_url, extract_links, host_is_refusing,
-    level_from_url,
+    HUB_PATHS, PARSER_TIER, SCHEMA_VERSION, TIER_HTML_PARSER, TIER_LXML,
+    TIER_REGEX, Candidate, Catalog, _AUTH_PATH,
+    _drop_institution_names, _resolve_parser_tier, _slug_to_name,
+    classify_probes, clean_url, describe_parser_tier, extract_links,
+    host_is_refusing, level_from_url,
     looks_like_course_name, looks_like_soft_404, page_heading, page_title,
     url_specificity,
 )
@@ -586,6 +588,82 @@ class TestExtractionHealth(unittest.TestCase):
         self.assertEqual(back.strategy, "listing")
         self.assertEqual(back.candidates[0].url, "https://x/a")
         self.assertEqual(back.candidates[0].level, "ug")
+
+
+class TestParserTier(unittest.TestCase):
+    """Extraction has three tiers, and a run must not be silent about which.
+
+    `bs4`/`lxml` arrived as undeclared `apt` packages on one interpreter's
+    path, so the same code produced a different coverage number elsewhere with
+    no warning at all.
+    """
+
+    def test_this_environment_is_the_best_tier(self):
+        """Guards the environment the committed figures were measured in."""
+        self.assertEqual(PARSER_TIER, TIER_LXML)
+
+    def test_the_tier_doubles_as_the_parser_name(self):
+        """`extract_links` passes it straight to BeautifulSoup."""
+        self.assertIn(PARSER_TIER, (TIER_LXML, TIER_HTML_PARSER, TIER_REGEX))
+
+    def test_lxml_resolves_with_no_warning(self):
+        tier, warning = _resolve_parser_tier()
+        self.assertEqual(tier, TIER_LXML)
+        self.assertEqual(warning, "")
+
+    def test_without_bs4_the_tier_is_regex_and_it_warns(self):
+        with unittest.mock.patch.object(catalog_module, "_HAVE_BS4", False):
+            tier, warning = _resolve_parser_tier()
+        self.assertEqual(tier, TIER_REGEX)
+        self.assertIn("bs4 is not installed", warning)
+
+    def test_without_lxml_the_tier_falls_back_and_warns(self):
+        real = catalog_module.BeautifulSoup
+
+        def only_html_parser(markup, parser):
+            if parser == TIER_LXML:
+                raise Exception("lxml not found")
+            return real(markup, parser)
+
+        with unittest.mock.patch.object(catalog_module, "BeautifulSoup",
+                                        only_html_parser):
+            tier, warning = _resolve_parser_tier()
+        self.assertEqual(tier, TIER_HTML_PARSER)
+        self.assertIn("lxml is not installed", warning)
+
+    def test_the_description_flags_a_degraded_tier(self):
+        with unittest.mock.patch.object(catalog_module, "PARSER_TIER",
+                                        TIER_HTML_PARSER):
+            self.assertIn("DEGRADED", describe_parser_tier())
+
+    def test_the_description_is_quiet_in_the_best_tier(self):
+        self.assertNotIn("DEGRADED", describe_parser_tier())
+
+
+class TestTheRegexFallbackStillWorks(unittest.TestCase):
+    """Degraded must mean announced, not broken.
+
+    A machine without `lxml` still has to be able to run the pipeline.
+    """
+
+    def test_the_regex_path_finds_the_same_links_on_simple_html(self):
+        with unittest.mock.patch.object(catalog_module, "PARSER_TIER",
+                                        TIER_REGEX):
+            degraded = extract_links(LISTING, "https://x.ac.uk/")
+        best = extract_links(LISTING, "https://x.ac.uk/")
+        self.assertEqual(degraded, best)
+
+    def test_the_html_parser_path_finds_the_same_links(self):
+        with unittest.mock.patch.object(catalog_module, "PARSER_TIER",
+                                        TIER_HTML_PARSER):
+            middle = extract_links(LISTING, "https://x.ac.uk/")
+        self.assertEqual(middle, extract_links(LISTING, "https://x.ac.uk/"))
+
+    def test_extract_links_does_not_resolve_a_parser_per_call(self):
+        """It used to re-try lxml and swallow the failure on every page."""
+        import inspect
+        src = inspect.getsource(extract_links)
+        self.assertNotIn("try:", src)
 
 
 if __name__ == "__main__":

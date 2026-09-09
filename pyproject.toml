@@ -1,0 +1,45 @@
+# Dependency declaration for the course-URL pipeline.
+#
+# Why this file exists at all
+# ---------------------------
+# `bs4` and `lxml` were never declared. They arrived as `apt` packages
+# (python3-bs4, python3-lxml) in /usr/lib/python3/dist-packages, visible only
+# because pyenv is set to `system` and the system interpreter has that
+# directory on its path. A pyenv-built interpreter cannot see it, so the same
+# code silently dropped to a worse HTML parser -- and produced a different
+# coverage number -- depending on which `python3` you happened to invoke.
+#
+# ADR-0003 claims the coverage figure is "a measured fact rather than an
+# estimate". That is only true of a declared environment. See ADR-0008.
+#
+# Versions are pinned to the apt vintage deliberately
+# ---------------------------------------------------
+# beautifulsoup4 4.10.0 and lxml 4.8.0 are what Ubuntu 22.04 shipped and what
+# produced the committed 46.1% / 51.1% figures. Pinning to them means this
+# environment reproduces those numbers rather than a new set of them.
+# Upgrading is a separate change whose effect on coverage should be measured,
+# not assumed -- bundling the two would make any difference unattributable.
+
+[project]
+name = "course-url-pipeline"
+version = "0.1.0"
+description = "Resolve course URLs for institutions from their own catalogues"
+# 3.10 is the family the published figures were measured on. Kept narrow on
+# purpose: a wider range invites a silent interpreter change.
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "beautifulsoup4==4.10.0",
+    "lxml==4.8.0",
+]
+
+[dependency-groups]
+# The suite is `unittest`-based and runs without pytest; pytest is declared so
+# the documented test command works in a fresh checkout, which it previously
+# did not on any interpreter on this machine.
+dev = ["pytest>=7"]
+
+[tool.uv]
+# Not a distributable library: the entry point is `run.py`, with `pipeline/`
+# and `tools/` imported from the repo root. Without this, uv tries to build
+# and install the project itself.
+package = false

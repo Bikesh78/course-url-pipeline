@@ -80,8 +80,12 @@ CREATE TABLE IF NOT EXISTS row_results (
 CREATE INDEX IF NOT EXISTS idx_row_results_run ON row_results (run_id);
 CREATE INDEX IF NOT EXISTS idx_row_results_status ON row_results (status);
 
--- Append-only. One row per (course, URL) ever assigned, so the sequence of
--- rows for a course is its URL history.
+-- One row per (course, *page*) ever assigned, so the sequence of rows for a
+-- course is its URL history. Rows are added but not removed; a row's own
+-- fields are updated in place when the same page is seen again, which is why
+-- `last_seen` and `status` move while `first_seen` does not. Two URLs that
+-- differ only by a trailing slash, a `www.` or a scheme are one page and share
+-- one row -- see `_touch_history_values`.
 CREATE TABLE IF NOT EXISTS url_history (
     course_id     TEXT NOT NULL,
     url           TEXT NOT NULL,
@@ -262,29 +266,54 @@ class Store:
                 continue
             if self._touch_history_values(
                     row["id"], url, (row.get("matched_status") or "").strip(),
-                    run_id, stamp):
+                    run_id, stamp,
+                    prior=(row.get("prior_course_url") or "").strip()):
                 changed += 1
         self.conn.commit()
         return changed
 
     def _touch_history_values(self, course_id: str, url: str, status: str,
-                              run_id: str, stamp: str) -> bool:
-        """Update history for one (course, url). True when the URL changed."""
-        cur = self.conn.execute(
-            "SELECT url FROM url_history WHERE course_id = ? "
-            "ORDER BY last_seen DESC LIMIT 1", (course_id,)).fetchone()
-        previous = cur["url"] if cur else None
+                              run_id: str, stamp: str,
+                              prior: str = "") -> bool:
+        """Update history for one (course, url). True when it left the sheet's.
+
+        Drift is measured against *the sheet's* URL — `prior` — and never
+        against the last row written. Those diverge in exactly the case that
+        matters: `seed_baseline` stamps the sheet's rows with its own
+        `processed_date` while a run stamps its own with the time it ran, so
+        "the most recent row" is the previous run's answer. Reading it that way
+        reported 10,522 drifted courses where the CSV said 8,194.
+
+        The same `classify_change` the CSV column uses decides it, so the two
+        agree by construction rather than by two comparisons happening to
+        match.
+        """
+        from pipeline.triage import classify_change, same_page
+
         verified = stamp if status == "verified" else None
 
-        existing = self.conn.execute(
-            "SELECT 1 FROM url_history WHERE course_id = ? AND url = ?",
-            (course_id, url)).fetchone()
-        if existing:
+        # A trailing slash, a `www.` or a scheme is not a different page, so
+        # fold onto the row this course already holds instead of filing a
+        # second one for the same page. 9,338 rows in the live database were
+        # such variants, because one write path canonicalised and one did not.
+        match = None
+        for r in self.conn.execute(
+                "SELECT url FROM url_history WHERE course_id = ?",
+                (course_id,)):
+            if r["url"] == url or same_page(r["url"], url):
+                match = r["url"]
+                break
+
+        if match is not None:
+            # OR REPLACE because normalising `url` onto the canonical form can
+            # collide with another same-page row left by the old behaviour;
+            # replacing it collapses the pair rather than raising.
             self.conn.execute(
-                "UPDATE url_history SET last_seen = ?, status = ?, "
-                "last_run = ?, last_verified = COALESCE(?, last_verified) "
+                "UPDATE OR REPLACE url_history SET url = ?, last_seen = ?, "
+                "status = ?, last_run = ?, "
+                "last_verified = COALESCE(?, last_verified) "
                 "WHERE course_id = ? AND url = ?",
-                (stamp, status, run_id, verified, course_id, url))
+                (url, stamp, status, run_id, verified, course_id, match))
         else:
             self.conn.execute(
                 "INSERT INTO url_history (course_id, url, first_seen, "
@@ -292,39 +321,26 @@ class Store:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (course_id, url, stamp, stamp, verified, status, run_id,
                  run_id))
-        return previous is not None and previous != url
+        return classify_change(prior, url) == "changed"
 
     def _touch_history(self, result, run_id: str, stamp: str) -> bool:
-        """Update history for one row. True when its URL changed.
+        """Update history for one row. True when its URL left the sheet's.
 
-        A URL already recorded for this course has its `last_seen` refreshed
-        rather than being duplicated, so history rows count *distinct* URLs a
-        course has held, not runs.
+        Delegates to the dict path so both phases canonicalise identically.
+        Phase 1 used to record the URL exactly as extracted while phase 2
+        canonicalised it, so a trailing slash read as a move *and* filed a
+        second history row for the same page.
+
+        The prior is `row.prior_course_url` — the same field `report.py` uses
+        to write the `url_change` column, so the database and the CSV cannot
+        drift apart in their answer.
         """
-        cur = self.conn.execute(
-            "SELECT url FROM url_history WHERE course_id = ? "
-            "ORDER BY last_seen DESC LIMIT 1", (result.row.id,)).fetchone()
-        previous = cur["url"] if cur else None
-        verified = stamp if result.status == "verified" else None
+        from pipeline.catalog import clean_url
 
-        existing = self.conn.execute(
-            "SELECT 1 FROM url_history WHERE course_id = ? AND url = ?",
-            (result.row.id, result.url)).fetchone()
-        if existing:
-            self.conn.execute(
-                "UPDATE url_history SET last_seen = ?, status = ?, "
-                "last_run = ?, last_verified = COALESCE(?, last_verified) "
-                "WHERE course_id = ? AND url = ?",
-                (stamp, result.status, run_id, verified,
-                 result.row.id, result.url))
-        else:
-            self.conn.execute(
-                "INSERT INTO url_history (course_id, url, first_seen, "
-                "last_seen, last_verified, status, first_run, last_run) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (result.row.id, result.url, stamp, stamp, verified,
-                 result.status, run_id, run_id))
-        return previous is not None and previous != result.url
+        return self._touch_history_values(
+            result.row.id, clean_url(result.url), result.status, run_id,
+            stamp, prior=(result.row.prior_course_url or "").strip())
+
 
     # -------------------------------------------------------------- baseline
     def seed_baseline(self, rows, run_id: str = "source_sheet") -> int:

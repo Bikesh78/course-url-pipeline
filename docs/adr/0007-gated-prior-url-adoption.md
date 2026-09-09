@@ -54,15 +54,16 @@ measurement says that swap is a coin flip.
 
 ## Consequences
 
-**Fill rises from 46.1% to 51.0%.** The plan predicted 54.0%, which did not
-model the sharing check below — the honest number is 51.0%.
+**Fill rises from 46.1% to 51.1%.** The plan predicted 54.0%, which did not
+model the sharing check below — the honest number is 51.1%, reproduced on the
+full sheet on 2026-09-07.
 
 **The gate is a referee, not an oracle.** A correct URL with an opaque slug
 scores badly, so the gate only ever chooses *between two URLs that both exist*.
 It never accepts one on its own, and ties keep our result.
 
 **Adoption must pass the sharing rule, and this is not optional.** The sheet
-shares URLs across courses at 60%. Of 5,862 adoption candidates, **1,949 were
+shares URLs across courses at 60%. Of 5,948 adoption candidates, **1,974 were
 refused** because the URL was already held by a course that is not a Variant
 Sibling — the sheet had filed the Endodontics page against Orthodontics *and*
 Periodontics, and a `bachelor-of-science-advanced` page against a Food and

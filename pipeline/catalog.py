@@ -77,7 +77,60 @@ try:
     from bs4 import BeautifulSoup
     _HAVE_BS4 = True
 except ImportError:                                    # pragma: no cover
+    BeautifulSoup = None
     _HAVE_BS4 = False
+
+# Extraction quality has three tiers, and which one a machine gets used to be
+# invisible. `bs4` and `lxml` arrived here as undeclared `apt` packages on one
+# interpreter's path, so the same code produced a different coverage number on
+# a different interpreter without a word — which is exactly what ADR-0003's
+# "measured fact rather than an estimate" cannot survive.
+#
+# The tier string doubles as the parser name `bs4` expects, which is why these
+# are spelled the way they are.
+TIER_LXML = "lxml"
+TIER_HTML_PARSER = "html.parser"
+TIER_REGEX = "regex"
+
+_INSTALL_HINT = "install it (`uv sync`) for full extraction"
+
+
+def _resolve_parser_tier() -> tuple[str, str]:
+    """Pick the best available parser once, returning (tier, warning).
+
+    Resolved at import rather than per page. The previous code re-tried `lxml`
+    inside `extract_links` and swallowed the failure on every page of every
+    Site, so a missing parser was both invisible and paid for repeatedly.
+    """
+    if not _HAVE_BS4:
+        return TIER_REGEX, (
+            f"bs4 is not installed: extracting links by regex, which finds "
+            f"fewer Candidates and will lower coverage — {_INSTALL_HINT}")
+    try:
+        BeautifulSoup("<a href='/x'>x</a>", TIER_LXML)
+    except Exception:
+        return TIER_HTML_PARSER, (
+            f"lxml is not installed: parsing with html.parser, which recovers "
+            f"fewer links from malformed pages — {_INSTALL_HINT}")
+    return TIER_LXML, ""
+
+
+PARSER_TIER, _PARSER_WARNING = _resolve_parser_tier()
+if _PARSER_WARNING:                                    # pragma: no cover
+    log.warning(_PARSER_WARNING)
+
+
+def describe_parser_tier() -> str:
+    """One line naming the extraction tier, for the run log and the report.
+
+    Reported into the run's own artefacts, not only stderr: a coverage figure
+    produced in a degraded tier should say so on its face, rather than in
+    scrollback someone has already closed.
+    """
+    if PARSER_TIER == TIER_LXML:
+        return "HTML parser: lxml (full extraction)"
+    return (f"HTML parser: {PARSER_TIER} — DEGRADED, coverage is not "
+            f"comparable with an lxml run ({_PARSER_WARNING})")
 
 # Paths that commonly root a course listing. Ordered by how often they were the
 # productive one across the top Institutions during planning.
@@ -450,17 +503,15 @@ def _text(fragment: str) -> str:
 def extract_links(html: str, base_url: str) -> list[tuple[str, str]]:
     """All (anchor text, absolute URL) pairs on a page."""
     out: list[tuple[str, str]] = []
-    if _HAVE_BS4:
-        try:
-            soup = BeautifulSoup(html, "lxml")
-        except Exception:
-            soup = BeautifulSoup(html, "html.parser")
-        for a in soup.find_all("a", href=True):
-            out.append((re.sub(r"\s+", " ", a.get_text(" ")).strip(),
-                        urllib.parse.urljoin(base_url, a["href"])))
-    else:                                              # pragma: no cover
+    if PARSER_TIER == TIER_REGEX:                      # pragma: no cover
         for href, inner in _A_RE.findall(html):
             out.append((_text(inner), urllib.parse.urljoin(base_url, href)))
+        return out
+    # PARSER_TIER is the parser name, already known good at import.
+    soup = BeautifulSoup(html, PARSER_TIER)
+    for a in soup.find_all("a", href=True):
+        out.append((re.sub(r"\s+", " ", a.get_text(" ")).strip(),
+                    urllib.parse.urljoin(base_url, a["href"])))
     return out
 
 

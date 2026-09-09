@@ -16,10 +16,15 @@ record. Measured across the full sheet, that silently altered **38.4% of rows**:
 | what happened to the sheet's URL | rows | share |
 |---|---|---|
 | neither side had one | 17,576 | 33.3% |
-| **the prior URL was dropped** | 8,241 | 15.6% |
-| **the URL was changed** | 8,328 | 15.8% |
-| unchanged | 12,265 | 23.3% |
+| **the prior URL was dropped** | 8,191 | 15.5% |
+| **the URL was changed** | 8,194 | 15.5% |
+| unchanged | 12,449 | 23.6% |
 | a URL was added | 6,293 | 11.9% |
+
+Measured on `phase2.csv`, after triage. The figures published with `d3cee60`
+(8,241 dropped / 8,328 changed / 12,265 unchanged) predated two fixes to
+`clean_url` — trailing slashes and stray whitespace — which correctly moved
+several hundred rows out of `changed` and into `unchanged`.
 
 334 of the changed rows had replaced a working URL with one that returned 404,
 and nothing in the output said so.
@@ -91,6 +96,18 @@ python tools/backfill_provenance.py            # report only
 python tools/backfill_provenance.py --write    # keeps a .bak
 ```
 
+A database written before both write paths canonicalised holds the same page
+under two spellings for some courses. That is a one-off repair, not
+maintenance:
+
+```bash
+python tools/dedupe_url_history.py             # report only
+python tools/dedupe_url_history.py --write     # keeps a .bak
+```
+
+Both tools report before they touch anything, and both keep a backup unless
+told `--no-backup`.
+
 It appends the three columns and **does not touch `course_url`**. Comparison
 runs through the same page-identity rule used everywhere else, so a trailing
 slash, a `www.` prefix or an `http`→`https` upgrade is correctly reported as
@@ -104,7 +121,7 @@ as each course's first entry, stamped with the sheet's `processed_date`
 is honest about when a URL was actually established.
 
 ```sql
--- courses whose URL has moved since the sheet was produced
+-- courses that have held more than one URL
 SELECT course_id, COUNT(*) AS urls
 FROM url_history GROUP BY course_id HAVING urls > 1;
 
@@ -113,7 +130,26 @@ SELECT url, first_seen, last_seen, last_verified, status
 FROM url_history WHERE course_id = ? ORDER BY first_seen;
 ```
 
-As of the first Phase 2 run, **8,328 courses** hold a different URL from the one
-the sheet delivered — which is exactly the `url_change = changed` count in the
-CSV. The two are computed independently, so their agreement is a check rather
-than a coincidence.
+**8,194 courses** hold a different URL from the one the sheet delivered, which
+is exactly the `url_change = changed` count in the CSV.
+
+The two agree **by construction**: both call `triage.classify_change`, so both
+answer the same question with the same equivalence — a trailing slash, a `www.`
+prefix or a scheme upgrade is not a move.
+
+That is deliberate, and it replaced something weaker. The figure published with
+`d3cee60` was cross-checked by two hand-rolled comparisons that happened to
+match, and they later stopped matching without anyone noticing: the database
+had begun answering a different question. It compared each delivered URL
+against *the most recent* `url_history` row rather than the sheet's, and since
+baseline rows carry the sheet's `processed_date` (June/July) while a run stamps
+its own with the time it ran (September), "most recent" meant *the previous
+run's answer*. Combined with one write path canonicalising and the other not,
+it reported 10,522 where the CSV said 8,194. Agreement by construction cannot
+drift apart like that.
+
+A related consequence, since fixed: because a trailing slash made a URL look
+new, `url_history` accumulated 9,338 rows that were the same page filed twice
+for one course. `tools/dedupe_url_history.py` collapses them, and both write
+paths now canonicalise, so the count above is distinct *pages*, not distinct
+spellings.

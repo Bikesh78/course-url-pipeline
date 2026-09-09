@@ -7,6 +7,7 @@ import os
 import random
 from collections import Counter, defaultdict
 
+from pipeline.catalog import describe_parser_tier
 from pipeline.load import INPUT_COLUMNS
 from pipeline.match import MatchResult
 from pipeline.triage import classify_change
@@ -186,12 +187,17 @@ def write_coverage_report(results: list[MatchResult], catalog_health: dict,
       f"(variants such as `X`, `X (Top-Up)`, `X with foundation year`), so a "
       f"search API will not resolve them either.")
     a("")
+    # The parser tier belongs in the report, not only the log: a coverage
+    # figure produced without lxml is not comparable with one produced with
+    # it, and the reader of this file may never see the run's stderr.
+    a(f"_{describe_parser_tier()}_")
+    a("")
     a("## Status distribution")
     a("")
     a("| status | rows | share |")
     a("|---|---|---|")
-    for k in ("verified", "probable", "ambiguous", "no_match", "no_catalog",
-              "url_dead"):
+    for k in ("verified", "probable", "ambiguous", "carried_over",
+              "search_found", "no_match", "no_catalog", "url_dead"):
         v = status.get(k, 0)
         a(f"| `{k}` | {v} | {100 * v / max(1, total):.1f}% |")
     a("")

@@ -19,15 +19,18 @@ import csv
 import time
 import urllib.parse
 
-from pipeline.catalog import (SCHEMA_VERSION, Catalog, build_catalog,
+from pipeline.config import DEFAULT_ENV_FILE, load_dotenv
+from pipeline.catalog import (PARSER_TIER, SCHEMA_VERSION, Catalog,
+                              build_catalog, describe_parser_tier,
                               page_heading, page_title)
 from pipeline.fetch import Fetcher, registrable
 from pipeline.logging_setup import set_current_site, setup_logging
-from pipeline.search import (FixtureProvider, NullProvider, build_query,
-                            on_site, searchable_rows)
+from pipeline.search import (SERPER_DELAY, FixtureProvider, NullProvider,
+                            SearchProviderError, SerperProvider, search_rows,
+                            searchable_rows)
 from pipeline.store import DEFAULT_DB, Store, new_run_id
-from pipeline.triage import triage_rows
-from pipeline.load import (DEFAULT_INPUT, _host_of, dedupe, group_by_site,
+from pipeline.triage import ShareIndex, triage_rows
+from pipeline.load import (DEFAULT_INPUT, dedupe, group_by_site,
                            load_rows,
                            normalise_website, site_display_name)
 from pipeline.match import MatchResult, Thresholds, assign
@@ -272,6 +275,21 @@ def process_site(fetcher: Fetcher, site_key: str, rows: list,
     return out, health
 
 
+def build_provider(args):
+    """The search provider this run should use.
+
+    A fixture wins if given, so the offline path stays available even with a
+    vendor selected. `null` is the default, so no run spends money unless it
+    was asked to by name.
+    """
+    if args.search_fixture:
+        return FixtureProvider(path=args.search_fixture)
+    if args.search_provider == "serper":
+        return SerperProvider(limit=args.search_limit,
+                              delay=args.search_delay)
+    return NullProvider()
+
+
 def run_phase2(args, run_id: str, log) -> int:
     """Prior-URL triage, then search, over an existing phase 1 result file.
 
@@ -283,6 +301,14 @@ def run_phase2(args, run_id: str, log) -> int:
     provider is configured; the default returns nothing, so the stage is
     inert rather than broken when no vendor has been chosen.
     """
+    # Built before anything else: a misconfigured vendor should fail in the
+    # first second, not after triage has worked through 52,703 rows.
+    try:
+        provider = build_provider(args)
+    except SearchProviderError as e:
+        log.error(f"search: {e}")
+        return 2
+
     with open(args.input, encoding="utf-8-sig", newline="") as fh:
         source = {r["id"]: r for r in csv.DictReader(fh)}
     with open(args.results, encoding="utf-8", newline="") as fh:
@@ -300,8 +326,11 @@ def run_phase2(args, run_id: str, log) -> int:
         log.info(f"url_history: seeded {seeded} baseline rows from the sheet",
                  extra={"run_id": run_id, "seeded": seeded})
 
-    stats = triage_rows(rows, source)
-    after = sum(1 for r in rows if (r.get("course_url") or "").strip())
+    # One index, shared by both stages: a URL triage carries over is a holder
+    # by the time search runs, so the two cannot hand one page to two courses.
+    index = ShareIndex(rows)
+
+    stats = triage_rows(rows, source, index=index)
     log.info(f"triage: adopted {stats.adopted} prior URLs "
              f"({stats.adopted_blank} blank, {stats.adopted_dead} dead, "
              f"{stats.adopted_weak} weak); rejected {stats.rejected_by_gate} "
@@ -311,28 +340,36 @@ def run_phase2(args, run_id: str, log) -> int:
                     "rejected_gate": stats.rejected_by_gate,
                     "rejected_sharing": stats.rejected_by_sharing})
 
-    provider = (FixtureProvider(path=args.search_fixture)
-                if args.search_fixture else NullProvider())
-    targets = searchable_rows(rows)
-    hits = 0
-    for r in targets:
-        site = _host_of(r.get("website", ""))
-        if not site:
-            continue
-        for url in provider.search(
-                build_query(r.get("name", ""), r.get("institution_name", ""),
-                            site), site):
-            if on_site(url, site):
-                hits += 1
-                break
-    log.info(f"search: {len(targets)} rows eligible, "
-             f"{hits} on-site results from "
-             f"{type(provider).__name__}"
-             + ("" if args.search_fixture else
-                " (no vendor configured — see docs/PHASE-2.md)"),
-             extra={"run_id": run_id, "search_targets": len(targets),
-                    "search_hits": hits,
-                    "provider": type(provider).__name__})
+    eligible = len(searchable_rows(rows))
+    # A broken vendor must not cost us triage's work: the stage stops itself,
+    # the run says so, and the file is still written with what Stage 1 decided.
+    ss = search_rows(rows, provider, index)
+    aborted = ""
+    if ss.aborted:
+        aborted = f"; ABORTED: {ss.aborted}"
+        log.error(f"search: {ss.aborted}")
+
+    detail = provider.report() if hasattr(provider, "report") else ""
+    log.info(f"search: {eligible} rows eligible, {ss.adopted} adopted from "
+             f"{type(provider).__name__} (rejected {ss.rejected_off_site} "
+             f"off-site, {ss.rejected_by_gate} by quality gate, "
+             f"{ss.rejected_by_sharing} by the sharing rule; "
+             f"{ss.no_results} returned nothing)"
+             + (f" [{detail}]" if detail else "")
+             + ("" if args.search_fixture or args.search_provider != "null"
+                else " — no vendor configured, see docs/PHASE-2.md")
+             + aborted,
+             extra={"run_id": run_id, "search_targets": eligible,
+                    "search_adopted": ss.adopted,
+                    "search_off_site": ss.rejected_off_site,
+                    "search_rejected_gate": ss.rejected_by_gate,
+                    "search_rejected_sharing": ss.rejected_by_sharing,
+                    "provider": type(provider).__name__,
+                    "search_aborted": bool(aborted)})
+
+    # Counted after both stages, so the headline figure and `finish_run` cover
+    # search adoptions as well as triage.
+    after = sum(1 for r in rows if (r.get("course_url") or "").strip())
 
     fields = list(rows[0].keys()) if rows else []
     with open(args.out, "w", encoding="utf-8", newline="") as fh:
@@ -355,16 +392,19 @@ def run_phase2(args, run_id: str, log) -> int:
              f"{100 * before / max(1, len(rows)):.1f}%)")
     for k, v in stats.changes.most_common():
         log.info(f"  url_change {k:10s} {v:6d}")
-    return 0
+
+    # The output is written and valid either way — triage's work is not thrown
+    # away because a vendor broke — but a scripted run has to be able to tell
+    # a clean stage 2 from one that died having filled nothing.
+    return 3 if ss.aborted else 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI entry point: resolve Institutions, verify, and write the outputs.
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI, separated from `main` so it can be parsed in tests.
 
-    Institutions are processed concurrently, then Verification re-fetches every
-    assigned URL. That second pass is deliberately re-ordered by
-    `interleave_by_domain` — grouped by Institution it parks every worker on a
-    single domain lock and runs about twelve times slower.
+    The regression that matters: `start_run` persists `vars(args)` into
+    the `runs` table, so a test has to be able to assert that no
+    credential appears there.
     """
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--input", default=DEFAULT_INPUT,
@@ -396,6 +436,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--search-fixture", default=None,
                     help="phase 2: JSON of canned search results; without a "
                          "vendor configured, search returns nothing")
+    ap.add_argument("--search-provider", default="null",
+                    choices=("null", "serper"),
+                    help="phase 2: search vendor. 'serper' spends real money "
+                         "and reads its key from $SERPER_API_KEY")
+    ap.add_argument("--search-limit", type=int, default=None,
+                    help="phase 2: cap paid search calls for this run, so a "
+                         "live vendor can be tried on part of the sheet")
+    ap.add_argument("--search-delay", type=float, default=SERPER_DELAY,
+                    help="phase 2: seconds between paid search calls")
     ap.add_argument("--db", default=DEFAULT_DB,
                     help="SQLite file for run state and URL history; "
                          "'' disables the store")
@@ -406,12 +455,33 @@ def main(argv: list[str] | None = None) -> int:
                          "run, so prefer it on a single site")
     ap.add_argument("--keep-logs", type=int, default=20,
                     help="previous runs of logs to retain; 0 keeps everything")
+    ap.add_argument("--env-file", default=DEFAULT_ENV_FILE,
+                    help="file of KEY=value lines to load into the "
+                         "environment; a path, never a secret, so it is safe "
+                         "in the persisted run args")
     ap.add_argument("--dry-run", action="store_true",
                     help="report the planned work and exit")
     ap.add_argument("--confident", type=float, default=None)
     ap.add_argument("--floor", type=float, default=None)
     ap.add_argument("--min-margin", type=float, default=None)
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: resolve Institutions, verify, and write the outputs.
+
+    Institutions are processed concurrently, then Verification re-fetches every
+    assigned URL. That second pass is deliberately re-ordered by
+    `interleave_by_domain` — grouped by Institution it parks every worker on a
+    single domain lock and runs about twelve times slower.
+    """
+    ap = build_parser()
     args = ap.parse_args(argv)
+
+    # Before anything reads a credential. Only names not already in the
+    # environment are set, so an inline `KEY=... python3 run.py` still wins.
+    # The count is logged, never the values.
+    loaded = load_dotenv(args.env_file)
 
     th = Thresholds()
     if args.confident is not None:
@@ -434,6 +504,15 @@ def main(argv: list[str] | None = None) -> int:
     log_path = setup_logging(run_id, args.log_dir, verbose=args.verbose,
                              quiet=args.dry_run, keep_runs=args.keep_logs)
     log = logging.getLogger("run")
+    if loaded:
+        log.info(f"loaded {loaded} setting(s) from {args.env_file}",
+                 extra={"env_file": args.env_file, "env_loaded": loaded})
+
+    # Which extraction tier this run got. A degraded run must announce itself:
+    # its coverage number is not comparable with an lxml run's.
+    tier_note = describe_parser_tier()
+    (log.info if PARSER_TIER == "lxml" else log.warning)(
+        tier_note, extra={"parser_tier": PARSER_TIER})
 
     if args.phase == 2:
         return run_phase2(args, run_id, log)

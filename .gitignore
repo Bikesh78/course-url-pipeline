@@ -37,6 +37,13 @@ review_queue.csv
 coverage_report.md
 calibration_sample.csv
 
+# Local secrets. The API key must never be committed, and broad staging in
+# this repo is not hypothetical -- eaabf6f swept in 30MB of stray files.
+# `.env.example` is the committed template; the real file never is.
+.env
+.env.*
+!.env.example
+
 __pycache__/
 *.py[cod]
 .venv/
