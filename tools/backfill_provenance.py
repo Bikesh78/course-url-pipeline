@@ -37,7 +37,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pipeline.load import DEFAULT_INPUT  # noqa: E402
-from pipeline.report import PROVENANCE_COLUMNS  # noqa: E402
+from pipeline.report import DEFAULT_OUT_DIR, PROVENANCE_COLUMNS  # noqa: E402
 from pipeline.triage import classify_change  # noqa: E402
 
 csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
@@ -77,7 +77,9 @@ def backfill(results_path: str, source_path: str) -> tuple[list[str], list[dict]
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--results", default="courses_filled.csv")
+    ap.add_argument("--results",
+                    default=os.path.join(DEFAULT_OUT_DIR,
+                                         "courses_filled.csv"))
     ap.add_argument("--source", default=DEFAULT_INPUT)
     ap.add_argument("--write", action="store_true",
                     help="without this, only report what would change")

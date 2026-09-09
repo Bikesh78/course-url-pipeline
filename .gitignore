@@ -11,6 +11,10 @@ catalogs/
 pipeline.db
 pipeline.db-wal
 pipeline.db-shm
+# Snapshots taken before a migration or repair (`.bak`, `.pre-dedupe`, ...).
+# Machine-local recovery copies, like the database itself.
+pipeline.db.*
+pipeline.db-*
 
 # Per-run logs: <run_id>.jsonl (structured) and <run_id>.log (readable).
 logs/
@@ -20,22 +24,27 @@ logs/
 # the repo root untracked and unignored.
 *.log
 
-# Chunk files and their per-chunk outputs. Regenerable from the sheet with
-# tools/split_by_site.py; tracking them would guarantee they go stale.
+# Every generated artefact. One rule for the directory, so a new output kind
+# needs no new entry here -- 87 per-chunk files once accumulated in the repo
+# root, which buried the one CSV this repo actually tracks.
+out/
+
+# Chunk inputs. Regenerable from the sheet with tools/split_by_site.py;
+# tracking them would guarantee they go stale.
 chunks/
 catalogs.baseline/
-courses_filled.*.csv
 *.csv.bak
-phase2*.csv
-review_queue.*.csv
-coverage_report.*.md
-calibration_sample.*.csv
 
-# Pipeline outputs. The input CSV is the only data this repo tracks.
+# Legacy output locations, kept so a checkout predating out/ stays clean.
 courses_filled.csv
+courses_filled.*.csv
 review_queue.csv
+review_queue.*.csv
 coverage_report.md
+coverage_report.*.md
 calibration_sample.csv
+calibration_sample.*.csv
+phase2*.csv
 
 # Local secrets. The API key must never be committed, and broad staging in
 # this repo is not hypothetical -- eaabf6f swept in 30MB of stray files.

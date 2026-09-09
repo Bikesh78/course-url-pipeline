@@ -72,8 +72,8 @@ default is still `NullProvider`, so no run can spend money by accident:
 
 ```bash
 cp .env.example .env                 # then fill in SERPER_API_KEY
-python run.py --phase 2 --results phase2.csv --out phase2.searched.csv \
-    --search-provider serper --search-limit 500
+python run.py --phase 2 --results out/phase2.csv \
+    --out out/phase2.searched.csv --search-provider serper --search-limit 500
 ```
 
 The key is read from the environment only — from a git-ignored `.env`, or from
@@ -128,15 +128,15 @@ ask.
 
 ```bash
 # Triage only (no vendor needed, nothing spent)
-python run.py --phase 2 --results courses_filled.csv --out phase2.csv
+python run.py --phase 2 --out out/phase2.csv
 
 # With canned search results, to exercise the whole adoption path offline
-python run.py --phase 2 --results courses_filled.csv \
-    --search-fixture fixtures/search.json --out phase2.csv
+python run.py --phase 2 --search-fixture fixtures/search.json \
+    --out out/phase2.csv
 
 # Live, capped to 500 paid calls (key from .env)
-python run.py --phase 2 --results phase2.csv --out phase2.searched.csv \
-    --search-provider serper --search-limit 500
+python run.py --phase 2 --results out/phase2.csv \
+    --out out/phase2.searched.csv --search-provider serper --search-limit 500
 ```
 
 | flag | effect |

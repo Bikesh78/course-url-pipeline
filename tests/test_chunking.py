@@ -11,6 +11,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tools.split_by_site import pack_sites, sha256_of  # noqa: E402
+import run  # noqa: E402
 from run import chunk_suffix  # noqa: E402
 
 SOURCE = "final_courses.csv"
@@ -274,6 +275,77 @@ class TestRealSplit(unittest.TestCase):
         sites.pop("", None)
         self.assertEqual(sorted(sites), sorted(c["hosts"]),
                          "site bucketing inside the chunk differs from the split")
+
+
+class TestOutputPaths(unittest.TestCase):
+    """Generated files go to --out-dir; explicit paths are left alone.
+
+    A chunked run writes four files per chunk, and 87 of them once accumulated
+    in the repo root beside the source and the one tracked input.
+    """
+
+    OUTPUT_ATTRS = ("out", "review_out", "report_out", "calibration_out")
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.out_dir = os.path.join(self._dir.name, "out")
+
+    def resolve(self, chunk_tag="", **overrides):
+        argv = ["--out-dir", self.out_dir]
+        for flag, value in overrides.items():
+            argv += [f"--{flag.replace('_', '-')}", value]
+        args = run.build_parser().parse_args(argv)
+        run.resolve_output_paths(args, chunk_tag)
+        return args
+
+    def test_the_four_defaults_land_in_the_output_directory(self):
+        args = self.resolve()
+        out = self.out_dir
+        self.assertEqual(args.out, os.path.join(out, "courses_filled.csv"))
+        self.assertEqual(args.review_out,
+                         os.path.join(out, "review_queue.csv"))
+        self.assertEqual(args.report_out,
+                         os.path.join(out, "coverage_report.md"))
+        self.assertEqual(args.calibration_out,
+                         os.path.join(out, "calibration_sample.csv"))
+
+    def test_nothing_defaults_into_the_repo_root(self):
+        """The input stays in the root; no *output* may default there."""
+        args = self.resolve()
+        for attr in self.OUTPUT_ATTRS:
+            path = getattr(args, attr)
+            self.assertNotEqual(os.path.dirname(path), "",
+                                f"--{attr} would land in the repo root")
+
+    def test_the_chunk_tag_is_kept_inside_the_directory(self):
+        args = self.resolve(".003")
+        self.assertEqual(os.path.basename(args.out), "courses_filled.003.csv")
+        self.assertEqual(os.path.dirname(args.out), self.out_dir)
+
+    def test_an_explicit_path_is_honoured_exactly(self):
+        """A caller who names a file gets that file, not out-dir/that file."""
+        args = self.resolve(out="/tmp/somewhere/mine.csv")
+        self.assertEqual(args.out, "/tmp/somewhere/mine.csv")
+
+    def test_an_explicit_path_does_not_disturb_the_other_defaults(self):
+        args = self.resolve(out="/tmp/somewhere/mine.csv")
+        self.assertEqual(os.path.dirname(args.review_out), self.out_dir)
+
+    def test_the_output_directory_is_created(self):
+        args = self.resolve()
+        self.assertTrue(os.path.isdir(os.path.dirname(args.out)))
+
+    def test_a_directory_is_created_for_an_explicit_path_too(self):
+        """A long run must not fail at its final write for a missing dir."""
+        target = os.path.join(self._dir.name, "deep", "nested", "mine.csv")
+        args = self.resolve(out=target)
+        self.assertTrue(os.path.isdir(os.path.dirname(args.out)))
+        self.assertEqual(args.out, target)
+
+    def test_the_default_directory_is_the_one_gitignored(self):
+        """`out/` is the name `.gitignore` covers as a directory."""
+        self.assertEqual(run.build_parser().parse_args([]).out_dir, "out")
 
 
 if __name__ == "__main__":

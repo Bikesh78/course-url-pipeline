@@ -20,6 +20,13 @@ from pipeline.triage import classify_change
 # it delivered. See docs/PROVENANCE.md.
 PROVENANCE_COLUMNS = ["prior_course_url", "prior_matched_status", "url_change"]
 
+# Every generated artefact goes here rather than the repo root. A full chunked
+# run writes four files per chunk -- 87 of them accumulated alongside the source
+# and the docs, which made the tracked input hard to pick out from the
+# regenerable output. Git-ignored as a directory, so a new output kind needs no
+# new ignore rule.
+DEFAULT_OUT_DIR = "out"
+
 OUTPUT_COLUMNS = INPUT_COLUMNS + ["match_margin", "live_page_score",
                                   "match_evidence", "row_flags"] + \
     PROVENANCE_COLUMNS

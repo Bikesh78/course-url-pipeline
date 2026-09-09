@@ -12,7 +12,7 @@ a sharing rule applied to half its rows at a time.
 Usage
 -----
     python tools/merge_chunks.py
-    python tools/merge_chunks.py --chunk-dir chunks --results-dir .
+    python tools/merge_chunks.py --chunk-dir chunks --results-dir out
 """
 
 from __future__ import annotations
@@ -26,6 +26,10 @@ import os
 import re
 import sqlite3
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from pipeline.report import DEFAULT_OUT_DIR  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -87,11 +91,18 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--chunk-dir", default="chunks")
-    ap.add_argument("--results-dir", default=".")
+    ap.add_argument("--results-dir", default=DEFAULT_OUT_DIR,
+                    help="where the per-chunk outputs were written")
     ap.add_argument("--db", default="pipeline.db")
-    ap.add_argument("--out", default="courses_filled.csv")
-    ap.add_argument("--review-out", default="review_queue.csv")
-    ap.add_argument("--report-out", default="coverage_report.md")
+    ap.add_argument("--out",
+                    default=os.path.join(DEFAULT_OUT_DIR,
+                                         "courses_filled.csv"))
+    ap.add_argument("--review-out",
+                    default=os.path.join(DEFAULT_OUT_DIR,
+                                         "review_queue.csv"))
+    ap.add_argument("--report-out",
+                    default=os.path.join(DEFAULT_OUT_DIR,
+                                         "coverage_report.md"))
     ap.add_argument("--allow-partial", action="store_true",
                     help="write to the canonical output names even when some "
                          "chunks have not been run")

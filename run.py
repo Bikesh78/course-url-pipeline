@@ -35,7 +35,8 @@ from pipeline.load import (DEFAULT_INPUT, dedupe, group_by_site,
                            normalise_website, site_display_name)
 from pipeline.match import MatchResult, Thresholds, assign
 from pipeline.normalize import score as score_pair
-from pipeline.report import (write_calibration_sample, write_coverage_report,
+from pipeline.report import (DEFAULT_OUT_DIR, write_calibration_sample,
+                             write_coverage_report,
                              write_filled_csv, write_review_queue)
 
 CATALOG_DIR = "catalogs"
@@ -399,6 +400,31 @@ def run_phase2(args, run_id: str, log) -> int:
     return 3 if ss.aborted else 0
 
 
+def resolve_output_paths(args, chunk_tag: str = "") -> None:
+    """Fill in any unset output path, and create the directories they need.
+
+    Unset paths land in `--out-dir`, so a run leaves nothing in the repo root:
+    a chunked run writes four files per chunk, and 87 of them once accumulated
+    alongside the source and the one tracked input.
+
+    A path given explicitly is honoured *exactly* as given and never rooted
+    under `--out-dir` — a caller who names a file gets that file. Directories
+    are created for whichever paths result, explicit ones included, so a long
+    run cannot fail at its final write for a missing directory.
+    """
+    defaults = {
+        "out": f"courses_filled{chunk_tag}.csv",
+        "review_out": f"review_queue{chunk_tag}.csv",
+        "report_out": f"coverage_report{chunk_tag}.md",
+        "calibration_out": f"calibration_sample{chunk_tag}.csv",
+    }
+    for attr, name in defaults.items():
+        if not getattr(args, attr, None):
+            setattr(args, attr, os.path.join(args.out_dir, name))
+        parent = os.path.dirname(os.path.abspath(getattr(args, attr)))
+        os.makedirs(parent, exist_ok=True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The CLI, separated from `main` so it can be parsed in tests.
 
@@ -407,6 +433,9 @@ def build_parser() -> argparse.ArgumentParser:
     credential appears there.
     """
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--out-dir", default=DEFAULT_OUT_DIR,
+                    help="directory for generated outputs; ignored for any "
+                         "output whose path is given explicitly")
     ap.add_argument("--input", default=DEFAULT_INPUT,
                     help="course sheet to read; the legacy "
                          "processed_courses.csv is still accepted")
@@ -431,7 +460,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--phase", type=int, default=1, choices=(1, 2),
                     help="1 crawls and matches; 2 runs prior-URL triage and "
                          "search over an existing result file")
-    ap.add_argument("--results", default="courses_filled.csv",
+    ap.add_argument("--results",
+                    default=os.path.join(DEFAULT_OUT_DIR,
+                                         "courses_filled.csv"),
                     help="phase 2: the phase 1 output to work from")
     ap.add_argument("--search-fixture", default=None,
                     help="phase 2: JSON of canned search results; without a "
@@ -494,11 +525,7 @@ def main(argv: list[str] | None = None) -> int:
     chunk_tag = chunk_suffix(args.input)
     if chunk_tag:
         check_chunk_freshness(args.input)
-    args.out = args.out or f"courses_filled{chunk_tag}.csv"
-    args.review_out = args.review_out or f"review_queue{chunk_tag}.csv"
-    args.report_out = args.report_out or f"coverage_report{chunk_tag}.md"
-    args.calibration_out = (args.calibration_out
-                            or f"calibration_sample{chunk_tag}.csv")
+    resolve_output_paths(args, chunk_tag)
 
     run_id = new_run_id()
     log_path = setup_logging(run_id, args.log_dir, verbose=args.verbose,

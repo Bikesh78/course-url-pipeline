@@ -246,7 +246,7 @@ crawling anything.
 
 ```bash
 # Prior-URL triage only. No network, no vendor, no cost.
-python run.py --phase 2 --results courses_filled.csv --out phase2.csv
+python run.py --phase 2 --out out/phase2.csv
 ```
 
 **Triage** chooses between our URL and the one the source sheet already had,
@@ -290,12 +290,23 @@ result — scored and sharing-checked, but never fetched, so never `verified`.
 
 ## Outputs
 
+**Everything generated lands in `out/`**, which is git-ignored as a directory —
+so a new output kind needs no new ignore rule, and the one CSV this repo tracks
+(`final_courses.csv`) is not buried among the regenerable ones. A chunked run
+writes four files per chunk, which is how 87 of them once accumulated in the
+repo root.
+
+`--out-dir` moves the directory. Any output whose path is given explicitly
+(`--out`, `--review-out`, `--report-out`, `--calibration-out`) is written
+exactly there, `--out-dir` notwithstanding, and its parent directory is created
+if needed.
+
 | File | Contents |
 |---|---|
-| `courses_filled.csv` | all input columns plus `course_url`, `matched_score`, `matched_status`, `match_margin`, `live_page_score`, `match_evidence`, `row_flags` |
-| `review_queue.csv` | only rows needing human triage, worst Margin first, both competing Candidates shown side by side |
-| `coverage_report.md` | coverage %, Review Queue size, per-Institution Extraction Health — the input to the Phase 2 spend decision |
-| `calibration_sample.csv` | ~150 stratified rows for one-time human labelling to fit thresholds |
+| `out/courses_filled.csv` | all input columns plus `course_url`, `matched_score`, `matched_status`, `match_margin`, `live_page_score`, `match_evidence`, `row_flags` |
+| `out/review_queue.csv` | only rows needing human triage, worst Margin first, both competing Candidates shown side by side |
+| `out/coverage_report.md` | coverage %, Review Queue size, per-Institution Extraction Health — the input to the Phase 2 spend decision |
+| `out/calibration_sample.csv` | ~150 stratified rows for one-time human labelling to fit thresholds |
 | `pipeline.db` | run state, per-row results and URL history (ADR-0005) |
 | `logs/<run_id>.jsonl` | one JSON object per event, with `site_key`, `candidates`, `failure_reason` and friends as top-level fields |
 | `logs/<run_id>.log` | the same run as readable console lines |
