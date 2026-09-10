@@ -1,7 +1,9 @@
 """Search fallback: what gets asked, and what a result is allowed to become."""
 
+import gzip
 import io
 import json
+import os
 import tempfile
 import unittest
 import unittest.mock
@@ -9,7 +11,8 @@ import unittest.mock
 from pipeline.search import (MAX_CONSECUTIVE_ERRORS, SEARCH_FOUND,
                              SERPER_ENDPOINT, FixtureProvider, NullProvider,
                              SearchProviderError, SerperProvider, build_query,
-                             _post_json, is_searchable, on_site,
+                             _post_json, is_searchable,
+                             links_from_entry, on_site, read_cache_entry,
                              search_rows, searchable_rows)
 from pipeline.load import _host_of
 from pipeline.triage import ShareIndex
@@ -590,6 +593,109 @@ class TestBatchRestriction(unittest.TestCase):
         stats = search_rows(rows, FixtureProvider({}), ShareIndex(rows),
                             only_ids={"nope"})
         self.assertEqual(stats.queried, 0)
+
+
+BODY = {"searchParameters": {"q": "q"},
+        "organic": [{"title": "Diploma of Business | ALIT",
+                     "link": "https://alit.edu.au/bsb50120-diploma-of-business",
+                     "snippet": "Study the BSB50120 Diploma of Business."},
+                    {"title": "News", "link": "https://alit.edu.au/news"}],
+        "credits": 1}
+
+
+class TestCacheFormat(SerperTestCase):
+    """The whole response is stored; both formats stay readable.
+
+    Keeping links only saved ~190 bytes an entry and cost two diagnoses: a
+    probe that returned nothing for every row could not be told apart from a
+    parsing fault, and whether a title would rescue a weak slug could not be
+    measured across 510 cached queries because the titles were gone.
+    """
+
+    def test_the_body_is_what_gets_written(self):
+        p = self.provider((200, BODY))
+        p.search("q", "alit.edu.au")
+        entry = read_cache_entry(p._cache_path("q"))
+        self.assertEqual(entry["body"], BODY)
+        self.assertEqual(entry["query"], "q")
+
+    def test_links_come_back_out_of_a_body(self):
+        p = self.provider((200, BODY))
+        first = p.search("q", "alit.edu.au")
+        self.assertEqual(first, p.search("q", "alit.edu.au"))
+        self.assertEqual(p.cache_hits, 1)
+
+    def test_the_title_survives_the_round_trip(self):
+        """The whole point: evidence beyond the URL is now recoverable."""
+        p = self.provider((200, BODY))
+        p.search("q", "alit.edu.au")
+        body = read_cache_entry(p._cache_path("q"))["body"]
+        self.assertEqual(body["organic"][0]["title"], "Diploma of Business | ALIT")
+        self.assertIn("BSB50120", body["organic"][0]["snippet"])
+
+    def test_a_legacy_links_only_entry_is_still_read(self):
+        """510 entries were written this way; re-paying for them is not an option."""
+        self.assertEqual(links_from_entry({"links": ["https://x/a"]}),
+                         ["https://x/a"])
+
+    def test_a_body_entry_extracts_through_the_same_rule(self):
+        self.assertEqual(links_from_entry({"body": BODY}),
+                         [h["link"] for h in BODY["organic"]])
+
+    def test_an_entry_with_neither_key_is_a_miss(self):
+        self.assertIsNone(links_from_entry({"query": "q"}))
+
+    def test_an_empty_organic_is_a_hit_returning_nothing(self):
+        """Not a miss -- that distinction stops 147 rows being re-paid."""
+        self.assertEqual(links_from_entry({"body": {"organic": []}}), [])
+
+    def test_a_non_dict_body_is_a_miss(self):
+        self.assertIsNone(links_from_entry({"body": "nope"}))
+
+    def test_non_string_links_are_dropped(self):
+        self.assertEqual(links_from_entry({"links": ["https://x/a", None, 7]}),
+                         ["https://x/a"])
+
+
+class TestCacheReadingIsForgiving(unittest.TestCase):
+    """A damaged cache should cost a query, not a run."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+
+    def path(self, name):
+        return os.path.join(self._dir.name, name)
+
+    def test_a_missing_file_is_a_miss(self):
+        self.assertIsNone(read_cache_entry(self.path("absent.json.gz")))
+
+    def test_malformed_json_is_a_miss(self):
+        p = self.path("bad.json.gz")
+        with gzip.open(p, "wt", encoding="utf-8") as fh:
+            fh.write("{not json")
+        self.assertIsNone(read_cache_entry(p))
+
+    def test_a_truncated_gzip_is_a_miss(self):
+        p = self.path("trunc.json.gz")
+        with open(p, "wb") as fh:
+            fh.write(b"\x1f\x8b\x08\x00truncated")
+        self.assertIsNone(read_cache_entry(p))
+
+    def test_a_json_list_instead_of_an_object_is_a_miss(self):
+        p = self.path("list.json.gz")
+        with gzip.open(p, "wt", encoding="utf-8") as fh:
+            json.dump(["not", "an", "object"], fh)
+        self.assertIsNone(read_cache_entry(p))
+
+    def test_a_failure_is_still_not_cached(self):
+        """A 429 must stay retryable."""
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        p = SerperProvider(api_key="k", cache_dir=d.name, delay=0,
+                           transport=lambda *a, **k: (429, {}))
+        p.search("q", "x.edu")
+        self.assertIsNone(read_cache_entry(p._cache_path("q")))
 
 
 if __name__ == "__main__":

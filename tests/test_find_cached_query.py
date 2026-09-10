@@ -86,12 +86,25 @@ class ToolCase(unittest.TestCase):
             w.writeheader()
             w.writerows(rows)
 
-    def cache_it(self, query, links):
+    def cache_it(self, query, links, titles=False):
+        organic = [{"link": u} for u in links]
+        if titles:
+            for h in organic:
+                h["title"] = "Diploma of Business | ALIT"
+                h["snippet"] = "Study the BSB50120 Diploma of Business."
         SerperProvider(
             api_key="k", cache_dir=self.cache, delay=0,
-            transport=lambda *a, **k: (
-                200, {"organic": [{"link": u} for u in links]})
+            transport=lambda *a, **k: (200, {"organic": organic})
         ).search(query, "alit.edu.au")
+
+    def cache_legacy(self, query, links):
+        """An entry in the pre-body format, as 510 real ones are."""
+        import gzip, json
+        from pipeline.search import cache_path_for
+        p = cache_path_for(query, MAX_RESULTS, self.cache)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with gzip.open(p, "wt", encoding="utf-8") as fh:
+            json.dump({"query": query, "links": links}, fh)
 
     def run_tool(self, *argv):
         with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -179,6 +192,33 @@ class TestSelection(ToolCase):
         self.write(self.rows(1))
         with self.assertRaises(SystemExit):
             main(["--results", self.results])
+
+
+class TestItShowsTheEvidenceBeyondTheUrl(ToolCase):
+    """A gate score says a link failed; a title says what the page was."""
+
+    def test_it_prints_the_title_and_snippet(self):
+        self.write([row("1", "Diploma of Business")])
+        self.cache_it(QUERY, ["https://alit.edu.au/bsb50120-diploma-of-business"],
+                      titles=True)
+        _, text = self.run_tool("1")
+        self.assertIn("title  : Diploma of Business | ALIT", text)
+        self.assertIn("snippet: Study the BSB50120", text)
+
+    def test_a_legacy_entry_says_it_has_none(self):
+        """"No title recorded" and "the title would not have helped" differ."""
+        self.write([row("1", "Diploma of Business")])
+        self.cache_legacy(QUERY, ["https://alit.edu.au/bsb50120-diploma-of-business"])
+        _, text = self.run_tool("1")
+        self.assertIn("legacy entry", text)
+        self.assertNotIn("title  :", text)
+
+    def test_a_legacy_entry_still_lists_its_links(self):
+        self.write([row("1", "Diploma of Business")])
+        self.cache_legacy(QUERY, ["https://alit.edu.au/bsb50120-diploma-of-business"])
+        _, text = self.run_tool("1")
+        self.assertIn("bsb50120-diploma-of-business", text)
+        self.assertIn("adoptable", text)
 
 
 if __name__ == "__main__":

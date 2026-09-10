@@ -31,8 +31,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import gzip
-import json
 import os
 import sys
 
@@ -42,7 +40,8 @@ from pipeline.load import _host_of  # noqa: E402
 from pipeline.match import FLOOR  # noqa: E402
 from pipeline.report import DEFAULT_OUT_DIR  # noqa: E402
 from pipeline.search import (MAX_RESULTS, build_query,  # noqa: E402
-                             cache_path_for, is_searchable, on_site)
+                             cache_path_for, is_searchable,
+                             links_from_entry, on_site, read_cache_entry)
 from pipeline.triage import gate_score  # noqa: E402
 
 SHOWN_BY_DEFAULT = 5
@@ -74,17 +73,28 @@ def report(row: dict, num: int, cache_dir: str | None) -> None:
     print(f'  query       : {query}')
     print(f'  cache file  : {path}')
 
-    if not os.path.exists(path):
+    entry = read_cache_entry(path)
+    if entry is None:
         # Absence is an answer, not a failure: the row has not been searched.
         print("  cached      : no")
         return
-    try:
-        links = json.load(gzip.open(path, "rt", encoding="utf-8"))["links"]
-    except (OSError, ValueError, KeyError, EOFError) as e:
-        print(f"  cached      : unreadable ({type(e).__name__})")
+    links = links_from_entry(entry)
+    if links is None:
+        print("  cached      : unreadable (neither a body nor a links list)")
         return
 
-    print(f"  cached      : yes, {len(links)} link(s)")
+    body = entry.get("body") if isinstance(entry.get("body"), dict) else None
+    # Entries written before the format change hold links only. Say so rather
+    # than printing empty titles: "the title would not have helped" and "the
+    # title was never recorded" are different answers.
+    detail = {}
+    if body:
+        for hit in body.get("organic") or []:
+            if isinstance(hit, dict) and hit.get("link"):
+                detail[hit["link"]] = hit
+
+    print(f"  cached      : yes, {len(links)} link(s)"
+          + ("" if body else "   (legacy entry — no title or snippet recorded)"))
     if not links:
         print("     the vendor returned nothing for this query")
         return
@@ -97,6 +107,12 @@ def report(row: dict, num: int, cache_dir: str | None) -> None:
                    else f"below {FLOOR} gate")
         print(f"     gate={gate:.3f}  on-site={str(onsite):5s}  {verdict}")
         print(f"        {url}")
+        hit = detail.get(url)
+        if hit:
+            if hit.get("title"):
+                print(f"        title  : {hit['title'][:88]}")
+            if hit.get("snippet"):
+                print(f"        snippet: {hit['snippet'][:88]}")
 
 
 def main(argv: list[str] | None = None) -> int:

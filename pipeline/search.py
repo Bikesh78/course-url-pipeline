@@ -184,6 +184,45 @@ def cache_path_for(query: str, num: int = MAX_RESULTS,
     return os.path.join(cache_dir, h[:2], h + ".json.gz")
 
 
+def read_cache_entry(path: str) -> dict | None:
+    """The parsed cache file at *path*, or None if it is unusable.
+
+    Anything unreadable -- absent, truncated, not JSON -- reads as a miss
+    rather than raising. A damaged cache should cost a query, not a run.
+    """
+    try:
+        if not os.path.exists(path):
+            return None
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
+            entry = json.load(fh)
+        return entry if isinstance(entry, dict) else None
+    except (OSError, ValueError, EOFError):
+        return None
+
+
+def links_from_entry(entry: dict) -> list[str] | None:
+    """The result URLs an entry holds, in either cache format.
+
+    Two formats exist and both stay readable:
+
+    * `{"body": {...}}` -- the whole vendor response, written since the format
+      changed. Links come out through `SerperProvider._links`, so the extraction
+      rule has one definition whether a response arrives from the network or
+      from disk.
+    * `{"links": [...]}` -- links only, the original format. 510 entries were
+      written this way and re-querying them would cost real money for data
+      already paid for, so they are read as they are. They simply carry no
+      title or snippet.
+
+    Returns None when the entry has neither key, which reads as a miss.
+    """
+    if "body" in entry and isinstance(entry["body"], dict):
+        return SerperProvider._links(entry["body"])
+    if "links" in entry:
+        return [u for u in entry["links"] if isinstance(u, str)]
+    return None
+
+
 class SerperProvider:
     """Google results via Serper, over stdlib HTTP, cached on disk.
 
@@ -233,22 +272,26 @@ class SerperProvider:
         return cache_path_for(query, self.num, self.cache_dir)
 
     def _read_cache(self, query: str) -> list[str] | None:
-        path = self._cache_path(query)
-        try:
-            if os.path.exists(path):
-                with gzip.open(path, "rt", encoding="utf-8") as fh:
-                    return list(json.load(fh)["links"])
-        except (OSError, ValueError, KeyError, EOFError):
-            return None
-        return None
+        entry = read_cache_entry(self._cache_path(query))
+        return None if entry is None else links_from_entry(entry)
 
-    def _write_cache(self, query: str, links: list[str]) -> None:
+    def _write_cache(self, query: str, body: dict) -> None:
+        """Store the whole response, not just the links extracted from it.
+
+        Keeping links only was cheaper by about 190 bytes an entry and cost
+        two diagnoses: when a probe returned nothing for every row, the cache
+        could not say whether the query or the parsing was at fault; and
+        whether a result's title would rescue a weak slug could not be
+        measured across 510 cached queries at all, because the titles were
+        gone. `search()` still returns `list[str]`, so the provider interface
+        is unchanged -- only what is kept on the way past.
+        """
         path = self._cache_path(query)
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             tmp = path + ".tmp"
             with gzip.open(tmp, "wt", encoding="utf-8") as fh:
-                json.dump({"query": query, "links": links}, fh)
+                json.dump({"query": query, "body": body}, fh)
             os.replace(tmp, path)
         except OSError:
             pass
@@ -268,7 +311,9 @@ class SerperProvider:
 
     def search(self, query: str, site: str) -> list[str]:
         """Return candidate URLs for *query*, best first. Empty on a miss."""
+        print(f"aaaaaaa === {query}")
         cached = self._read_cache(query)
+        print(f"cahced result === {cached}")
         if cached is not None:
             self.cache_hits += 1
             return cached
@@ -284,6 +329,9 @@ class SerperProvider:
             self._wait_turn()
             self.paid_calls += 1
             status, body = self.transport(SERPER_ENDPOINT, payload, headers)
+            print(f"serper body ====", body)
+            print(f"serper status ====", status)
+            print("json dump",json.dumps(body, indent=2)[:1500])
 
             if status in (401, 403):
                 raise SearchProviderError(
@@ -292,7 +340,7 @@ class SerperProvider:
             if status == 200:
                 links = self._links(body)
                 self._consecutive_errors = 0
-                self._write_cache(query, links)
+                self._write_cache(query, body)
                 return links
             # 429 and 5xx are "slow down" or "try later", so back off and
             # retry; anything else is not worth a second paid call.
@@ -444,6 +492,7 @@ def search_rows(rows: list[dict], provider: SearchProvider,
 
     for r in searchable_rows(rows, only_ids):
         site = _host_of(r.get("website", ""))
+        print(f"serper search ====", site)
         if not site:
             continue
         name = r.get("name", "")
@@ -453,6 +502,7 @@ def search_rows(rows: list[dict], provider: SearchProvider,
         try:
             results = provider.search(build_query(name, inst, site),
                                       site)[:MAX_RESULTS]
+            print(f"sereper search result ====", results)
         except SearchProviderError as e:
             # The provider is broken, not merely empty-handed. Stop here and
             # let the caller report it; rows already filled stay filled.
@@ -463,6 +513,7 @@ def search_rows(rows: list[dict], provider: SearchProvider,
             continue
 
         on = [u for u in results if on_site(u, site)]
+        print(f"on ======", on)
         stats.rejected_off_site += len(results) - len(on)
         if not on:
             continue
