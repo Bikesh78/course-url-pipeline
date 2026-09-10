@@ -180,6 +180,34 @@ def phase1_url(row: dict) -> str:
     return (row.get("course_url") or "").strip()
 
 
+def occupant_url(row: dict) -> str:
+    """The URL this row *holds* for sharing purposes, whatever set it.
+
+    The counterpart to `phase1_url`, and the distinction matters. Triage
+    *decides* from phase 1 so that re-running cannot compound its own output.
+    Occupancy is a different question: which page is already spoken for. A row
+    phase 2 answered holds its delivered URL and has no phase-1 value at all,
+    so reading `phase1_url` here made every search and manual URL invisible to
+    the sharing rule on the next run.
+
+    Measured: 153 search URLs and 3 manual ones vanished from the index on a
+    re-run, and one row promptly took a page another course already held --
+    "Certificate IV in Kitchen Management" was denied by sharing on the first
+    run and accepted on the second, ending up with both
+    `search_denied_sharing` and `url_from_search`. That is the collapse
+    ADR-0004 exists to prevent, reimported by a re-run.
+
+    Only `NEVER_GIVEN_UP` statuses read the delivered column. Every other
+    row's URL is still triage's to decide, so phase 1 stays the baseline --
+    a `carried_over` row must not have its adopted URL treated as occupied
+    before triage has re-derived that same decision, or the holder would be
+    counted twice.
+    """
+    if (row.get("matched_status") or "").strip() in NEVER_GIVEN_UP:
+        return (row.get("course_url") or "").strip()
+    return phase1_url(row)
+
+
 def phase1_status(row: dict) -> str:
     """The status extraction assigned, paired with `phase1_url`."""
     if "phase1_matched_status" in row:
@@ -202,7 +230,7 @@ class ShareIndex:
         self.names: dict[str, str] = {}
         for r in rows:
             self.names[r["id"]] = r.get("name", "")
-            url = phase1_url(r)
+            url = occupant_url(r)
             if url:
                 self.by_site[_host_of(r.get("website", ""))][url].append(r["id"])
 

@@ -2,9 +2,10 @@
 
 import unittest
 
+from pipeline.load import _host_of
 from pipeline.statuses import MANUALLY_ASSIGNED, SEARCH_FOUND
-from pipeline.triage import (CARRIED_OVER, add_flag, classify_change,
-                             gate_score,
+from pipeline.triage import (CARRIED_OVER, ShareIndex, add_flag,
+                             classify_change, gate_score, occupant_url,
                              triage_rows)
 
 SITE = "https://courses.aber.ac.uk"
@@ -178,6 +179,58 @@ class TestSharingGuard(unittest.TestCase):
                                             "https://x.edu.au/anthropology",
                                             "matched")})
         self.assertEqual(st.adopted_blank, 1)
+
+
+class TestWhoOccupiesAUrl(unittest.TestCase):
+    """A phase-2 URL must still count as a holder on the *next* run.
+
+    The index used to be built from `phase1_url`, which is empty for a row
+    search or a person answered -- so 153 search URLs and 3 manual ones
+    disappeared from it on a re-run and the page became free to hand to a
+    second course. Triage decides from phase 1 for idempotency; occupancy is a
+    different question and needs the delivered column.
+    """
+
+    def test_a_search_url_is_held_by_the_row_that_has_it(self):
+        r = row("1", "Data Science BSc (Hons)", DS, SEARCH_FOUND)
+        r["phase1_course_url"] = ""
+        self.assertEqual(occupant_url(r), DS)
+
+    def test_a_manual_url_is_held_too(self):
+        r = row("1", "Secondary Junior 7-10", SECTION_PAGE, MANUALLY_ASSIGNED)
+        r["phase1_course_url"] = ""
+        self.assertEqual(occupant_url(r), SECTION_PAGE)
+
+    def test_every_other_row_still_reads_phase_1(self):
+        """A carried-over URL is triage's to re-derive, not a holder yet."""
+        r = row("1", "Data Science BSc (Hons)", SECTION_PAGE, CARRIED_OVER)
+        r["phase1_course_url"] = DS
+        self.assertEqual(occupant_url(r), DS)
+
+    def test_a_second_course_cannot_take_a_searched_page(self):
+        """The measured failure: denied on run 1, accepted on run 2.
+
+        Both rows want one page and they are not Variant Siblings, so whoever
+        holds it keeps it -- on every run, not just the one that filled it.
+        """
+        held = row("1", "Certificate IV in Kitchen Management and Diploma of "
+                        "Hospitality Management", DS, SEARCH_FOUND)
+        held["phase1_course_url"] = ""
+        other = row("2", "Certificate IV in Kitchen Management")
+        other["phase1_course_url"] = ""
+        index = ShareIndex([held, other])
+        self.assertTrue(index.would_break(
+            _host_of(SITE), DS, other["name"]))
+
+    def test_a_sibling_may_still_share_it(self):
+        """The guard is about the collapse, not about search results."""
+        held = row("1", "Anthropology BA (Hons)", ANTH, SEARCH_FOUND)
+        held["phase1_course_url"] = ""
+        other = row("2", "Anthropology with Placement BA (Hons)")
+        other["phase1_course_url"] = ""
+        index = ShareIndex([held, other])
+        self.assertFalse(index.would_break(
+            _host_of(SITE), ANTH, other["name"]))
 
 
 class TestProvenanceIsAlwaysWritten(unittest.TestCase):
