@@ -30,6 +30,7 @@ from patterns.
 | why crawling is per-site, not per-institution | [docs/adr/0006-the-crawl-unit-is-a-website-not-an-institution.md](./docs/adr/0006-the-crawl-unit-is-a-website-not-an-institution.md) |
 | why the environment is pinned, and what an undeclared one cost | [docs/adr/0008](./docs/adr/0008-pinned-environment.md) |
 | why there is one result file, not one per phase | [docs/adr/0009](./docs/adr/0009-one-result-file.md) |
+| how a human decision enters the pipeline | [docs/adr/0010](./docs/adr/0010-human-decisions-are-an-input.md) |
 
 ## Guarantees
 
@@ -296,6 +297,17 @@ break.
 `matched_status` gains `carried_over`, for a row whose URL came from the sheet
 rather than from extraction, and `search_found`, for one that came from a search
 result — scored and sharing-checked, but never fetched, so never `verified`.
+
+It also gains `manually_assigned`, for a row a person decided. Some rows have no
+course page at all: a school year band whose only relevant page is the section
+covering it, where both the slug and the live page score 0.429 against a 0.55
+floor. Those decisions live in **`manual_urls.csv`** — an *input*, tracked in
+git, applied last and winning over triage and search alike, so a re-run cannot
+revert it. See [docs/adr/0010](./docs/adr/0010-human-decisions-are-an-input.md).
+
+```csv
+id,course_url,note,decided_by,decided_at
+```
 
 ## Outputs
 

@@ -45,12 +45,37 @@ Blank on a row whose delivered URL came from Phase 2 in a file written before
 these columns existed: that file never recorded what extraction found, and a
 guess would be a lie the pipeline then trusts.
 
+## `manual_urls.csv` and `manually_assigned`
+
+Some rows cannot be answered by any signal the pipeline has. `manual_urls.csv`
+is where a person's decision goes — an **input**, tracked in git, applied as the
+last Phase 2 stage and winning over triage and search:
+
+```csv
+id,course_url,note,decided_by,decided_at
+```
+
+An applied row reads `matched_status = manually_assigned`, carries
+`url_from_human`, and its `match_evidence` names the decider, the date and the
+reason. `matched_score` and `match_margin` are blank on purpose: the gate was
+overridden, so printing the score it failed would read as justification.
+
+Two overrides are allowed and both are flagged rather than silent —
+`share_accepted_by_human` when the page is already held by a non-sibling course,
+and `url_off_institution_domain` when it is not on the institution's own site.
+
+It is an input rather than an edit because an edit does not survive: 112 of the
+751 unfilled year-band rows have a prior URL in the sheet that triage would
+adopt on the next run, reverting it. `manually_assigned` is in
+`statuses.NEVER_GIVEN_UP` for exactly that reason.
+
 ## `phase`
 
 | value | meaning |
 |---|---|
 | `1` | extraction from the institution's own site produced the URL |
 | `2` | Phase 2 produced it — triage carried it over, or search found it |
+| `manual` | a person decided it, via `manual_urls.csv` |
 | *(blank)* | no URL was delivered, so no phase produced one |
 
 **Derived, never decided.** `phase` is computed from `matched_status` and the

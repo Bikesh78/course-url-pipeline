@@ -27,6 +27,8 @@ from pipeline.catalog import (PARSER_TIER, SCHEMA_VERSION, Catalog,
                               page_heading, page_title)
 from pipeline.fetch import Fetcher, registrable
 from pipeline.logging_setup import set_current_site, setup_logging
+from pipeline.manual import (DEFAULT_MANUAL_FILE, apply_manual_urls,
+                             load_manual_urls)
 from pipeline.search import (SEARCH_FOUND, SERPER_DELAY, FixtureProvider,
                             NullProvider, SearchProviderError, SerperProvider,
                             search_rows, searchable_rows)
@@ -492,8 +494,31 @@ def run_phase2(args, run_id: str, log) -> int:
                  extra={"run_id": run_id, **{f"verify_{k}": v
                                              for k, v in vc.items()}})
 
-    # Counted after both stages, so the headline figure and `finish_run` cover
-    # search adoptions as well as triage.
+    # Applied last, so a person's decision wins over both automated stages.
+    manual = load_manual_urls(args.manual_urls)
+    if manual:
+        ms = apply_manual_urls(rows, manual, index)
+        log.info(f"manual: {ms.applied} of {len(manual)} decisions applied "
+                 f"from {args.manual_urls}"
+                 + (f"; {ms.shared_pages} share a page with another course"
+                    if ms.shared_pages else "")
+                 + (f"; {ms.off_domain} off the institution's domain"
+                    if ms.off_domain else ""),
+                 extra={"run_id": run_id, "manual_applied": ms.applied,
+                        "manual_shared": ms.shared_pages,
+                        "manual_off_domain": ms.off_domain})
+        # Named, not counted: a mistyped id that silently does nothing is the
+        # failure most likely to waste someone's afternoon.
+        for cid in ms.unknown_ids:
+            log.warning(f"manual: no row has id {cid!r} — decision ignored",
+                        extra={"run_id": run_id, "manual_unknown_id": cid})
+        for bad in ms.bad_urls:
+            log.warning(f"manual: not an http URL — {bad}",
+                        extra={"run_id": run_id})
+
+    # Counted once every stage has run, so the headline figure and
+    # `finish_run` cover triage, search and the manual overlay alike. Counting
+    # it earlier undercounted by exactly the number of manual decisions.
     after = sum(1 for r in rows if (r.get("course_url") or "").strip())
 
     # Recomputed here rather than inherited: triage and search have changed
@@ -617,6 +642,10 @@ def build_parser() -> argparse.ArgumentParser:
                     choices=("null", "serper"),
                     help="phase 2: search vendor. 'serper' spends real money "
                          "and reads its key from $SERPER_API_KEY")
+    ap.add_argument("--manual-urls", default=DEFAULT_MANUAL_FILE,
+                    help="phase 2: CSV of human decisions (id, course_url, "
+                         "note, decided_by, decided_at) applied last and "
+                         "winning over triage and search")
     ap.add_argument("--no-backup", action="store_true",
                     help="phase 2: skip the .bak copy of the file being "
                          "replaced")

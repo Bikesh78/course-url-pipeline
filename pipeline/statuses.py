@@ -50,9 +50,17 @@ NO_CATALOG = "no_catalog"
 CARRIED_OVER = "carried_over"
 SEARCH_FOUND = "search_found"
 
+# Neither phase produced this one: a person did, via `manual_urls.csv`. Some
+# rows cannot be answered by any signal the pipeline has -- a school year band
+# whose only relevant page is the section page covering it -- and a human
+# decision needs somewhere to live that survives a re-run. See ADR-0010.
+MANUALLY_ASSIGNED = "manually_assigned"
+
 # A URL bearing one of these came from phase 2 rather than from extraction.
 # `report.phase_for` reads exactly this, so adding a phase-2 status here is the
 # only edit needed to classify it.
+# `MANUALLY_ASSIGNED` is deliberately absent: it is not a phase, and
+# `phase_for` reports it as `manual`.
 PHASE_2_STATUSES = (CARRIED_OVER, SEARCH_FOUND)
 
 # Statuses whose URL triage will give up in favour of a better-scoring prior.
@@ -69,6 +77,14 @@ PHASE_2_STATUSES = (CARRIED_OVER, SEARCH_FOUND)
 # 6 of the 131 rows in the first search trial had a gate-clearing prior, so
 # leaving it out of this tuple is what stops a re-run undoing paid work.
 WEAK_STATUSES = (AMBIGUOUS,)
+
+# Statuses triage must leave completely alone, for the reason stated just
+# above: their phase-1 answer is empty, so triage would read "we have nothing"
+# and adopt a sheet URL over a decision better than its own. 112 of the 751
+# unfilled year-band rows have a gate-clearing prior waiting to do exactly
+# that, which is why a hand edit to the output file is no substitute for an
+# overlay -- see ADR-0010.
+NEVER_GIVEN_UP = (SEARCH_FOUND, MANUALLY_ASSIGNED)
 
 # Prior labels from the sheet that triage will swap *towards*. `low_confidence`
 # is excluded: our `ambiguous` beat it 1,321 to 1,105.

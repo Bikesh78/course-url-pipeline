@@ -50,8 +50,9 @@ from pipeline.catalog import _slug_to_name, clean_url
 from pipeline.load import _host_of
 from pipeline.match import FLOOR, SHARE_CAP
 from pipeline.normalize import are_variant_siblings, score
-from pipeline.statuses import (CARRIED_OVER, PHASE_2_STATUSES, SEARCH_FOUND,
-                               TRUSTED_PRIOR, URL_DEAD, WEAK_STATUSES)
+from pipeline.statuses import (CARRIED_OVER, NEVER_GIVEN_UP,
+                               PHASE_2_STATUSES, SEARCH_FOUND, TRUSTED_PRIOR,
+                               URL_DEAD, WEAK_STATUSES)
 
 # The vocabulary lives in `pipeline.statuses` so that search can import it
 # too -- search already imports this module, so the reverse would be a cycle.
@@ -244,12 +245,13 @@ def triage_rows(rows: list[dict], source: dict[str, dict],
         name = r.get("name", "")
         inst = r.get("institution_name", "")
 
-        # A row search already answered is left exactly as it is. Triage
-        # decides from phase 1's columns, and for these rows extraction found
-        # nothing -- so without this it would read "we have nothing", adopt a
-        # prior URL, and silently undo work that cost money. 6 of the 131 rows
-        # in the first search trial had a gate-clearing prior.
-        if (r.get("matched_status") or "").strip() == SEARCH_FOUND:
+        # A row search or a human already answered is left exactly as it is.
+        # Triage decides from phase 1's columns, and for these rows extraction
+        # found nothing -- so without this it would read "we have nothing",
+        # adopt a prior URL, and silently undo work that cost money or someone
+        # an afternoon. 6 of the 131 search adoptions had a gate-clearing
+        # prior; so do 112 of the 751 unfilled year-band rows.
+        if (r.get("matched_status") or "").strip() in NEVER_GIVEN_UP:
             stats.kept_ours += 1
             r["prior_course_url"] = prior
             r["prior_matched_status"] = prior_status

@@ -2,7 +2,7 @@
 
 import unittest
 
-from pipeline.statuses import SEARCH_FOUND
+from pipeline.statuses import MANUALLY_ASSIGNED, SEARCH_FOUND
 from pipeline.triage import (CARRIED_OVER, add_flag, classify_change,
                              gate_score,
                              triage_rows)
@@ -11,6 +11,7 @@ SITE = "https://courses.aber.ac.uk"
 DS = "https://courses.aber.ac.uk/undergraduate/data-science"
 DS_OTHER = "https://courses.aber.ac.uk/undergraduate/data-science-iy"
 ANTH = "https://courses.aber.ac.uk/undergraduate/anthropology"
+SECTION_PAGE = "https://courses.aber.ac.uk/undergraduate"
 
 
 def row(rid, name, url="", status="no_match", website=SITE, flags=""):
@@ -233,6 +234,36 @@ class TestDecidesFromPhase1NotFromWhatWasDelivered(unittest.TestCase):
         self.assertNotIn("phase1_course_url", r)
         triage_rows([r], {"1": source("1", DS, "matched")})
         self.assertEqual(r["course_url"], DS)
+
+
+class TestManualDecisionsAreNotGivenUp(unittest.TestCase):
+    """The failure an overlay exists to avoid.
+
+    112 of the 751 unfilled year-band rows have a gate-clearing prior in the
+    sheet. Triage decides from the phase-1 columns, which are empty for these
+    rows, so without the guard it reads "we have nothing" and adopts that
+    prior over a decision a person made deliberately.
+    """
+
+    def manual_row(self):
+        r = row("1", "Data Science", url=SECTION_PAGE,
+                status=MANUALLY_ASSIGNED)
+        r["phase1_course_url"] = ""
+        r["phase1_matched_status"] = "no_catalog"
+        return r
+
+    def test_a_human_url_survives_a_gate_clearing_prior(self):
+        r = self.manual_row()
+        stats = triage_rows([r], {"1": source("1", DS, "matched")})
+        self.assertEqual(r["course_url"], SECTION_PAGE)
+        self.assertEqual(r["matched_status"], MANUALLY_ASSIGNED)
+        self.assertEqual(stats.adopted, 0)
+
+    def test_its_provenance_is_still_written(self):
+        r = self.manual_row()
+        triage_rows([r], {"1": source("1", DS, "matched")})
+        self.assertEqual(r["prior_course_url"], DS)
+        self.assertEqual(r["url_change"], "changed")
 
 
 class TestSearchResultsAreNotGivenUp(unittest.TestCase):

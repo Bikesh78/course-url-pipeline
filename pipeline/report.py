@@ -10,7 +10,7 @@ from collections import Counter, defaultdict
 from pipeline.catalog import describe_parser_tier
 from pipeline.load import INPUT_COLUMNS
 from pipeline.match import MatchResult
-from pipeline.statuses import PHASE_2_STATUSES
+from pipeline.statuses import MANUALLY_ASSIGNED, PHASE_2_STATUSES
 from pipeline.triage import classify_change
 
 # Provenance columns are appended, never inserted: a consumer reading by name
@@ -53,7 +53,12 @@ def phase_for(status: str, url: str) -> str:
     """
     if not (url or "").strip():
         return ""
-    return "2" if (status or "").strip() in PHASE_2_STATUSES else "1"
+    status = (status or "").strip()
+    if status == MANUALLY_ASSIGNED:
+        # Not a phase. A person decided it, and saying `2` would credit the
+        # search stage with an answer it could not reach.
+        return "manual"
+    return "2" if status in PHASE_2_STATUSES else "1"
 
 
 # What extraction alone decided, kept beside what was finally delivered.
@@ -245,7 +250,8 @@ def write_coverage_report(results: list[MatchResult], catalog_health: dict,
     a("| status | rows | share |")
     a("|---|---|---|")
     for k in ("verified", "probable", "ambiguous", "carried_over",
-              "search_found", "no_match", "no_catalog", "url_dead"):
+              "search_found", "manually_assigned", "no_match", "no_catalog",
+              "url_dead"):
         v = status.get(k, 0)
         a(f"| `{k}` | {v} | {100 * v / max(1, total):.1f}% |")
     a("")
