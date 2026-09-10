@@ -402,5 +402,65 @@ class TestNoSamePageDuplicates(StoreCase):
         self.assertEqual(len(self.store.history_for("1")), 2)
 
 
+class TestSeedingFoldsSamePageRows(StoreCase):
+    """Seeding must not re-file a page the write path already collapsed.
+
+    The loop that produced 89 duplicate pairs in the live database, one per
+    run: the sheet holds `www.x/y`, extraction finds `x/y`, the fold in
+    `_touch_history_values` rewrites the stored row to the latter, and the next
+    seeding no longer finds its own `www.` form by exact match and inserts it
+    again. Both halves ended up stamped `first_run=source_sheet`, which is why
+    the cause was not obvious from the rows.
+    """
+
+    def test_a_www_variant_is_not_filed_as_a_second_row(self):
+        rid = new_run_id()
+        self.store.start_run(rid, "x.csv", {})
+        self.store.record_url_rows(
+            rid, [out_row(url=DS, prior=DS_WWW)])
+        seeded = self.store.seed_baseline([sheet(url=DS_WWW)])
+        self.assertEqual(seeded, 0)
+        self.assertEqual(len(self.store.history_for("1")), 1)
+
+    def test_the_surviving_row_keeps_our_canonical_url(self):
+        rid = new_run_id()
+        self.store.start_run(rid, "x.csv", {})
+        self.store.record_url_rows(rid, [out_row(url=DS, prior=DS_WWW)])
+        self.store.seed_baseline([sheet(url=DS_WWW)])
+        self.assertEqual(self.store.history_for("1")[0]["url"], DS)
+
+    def test_the_earlier_start_date_wins(self):
+        """History exists to say when a URL was established."""
+        rid = new_run_id()
+        self.store.start_run(rid, "x.csv", {})
+        self.store.record_url_rows(rid, [out_row(url=DS, prior=DS_WWW)])
+        self.store.seed_baseline([sheet(url=DS_WWW, date="2026-06-24")])
+        self.assertEqual(self.store.history_for("1")[0]["first_seen"],
+                         "2026-06-24")
+
+    def test_a_trailing_slash_variant_is_also_folded(self):
+        rid = new_run_id()
+        self.store.start_run(rid, "x.csv", {})
+        self.store.record_url_rows(rid, [out_row(url=DS, prior=DS)])
+        self.assertEqual(self.store.seed_baseline([sheet(url=DS_SLASH)]), 0)
+        self.assertEqual(len(self.store.history_for("1")), 1)
+
+    def test_a_genuinely_different_url_is_still_seeded(self):
+        rid = new_run_id()
+        self.store.start_run(rid, "x.csv", {})
+        self.store.record_url_rows(rid, [out_row(url=DS, prior=DS)])
+        self.assertEqual(self.store.seed_baseline([sheet(url=DS_NEW)]), 1)
+        self.assertEqual(len(self.store.history_for("1")), 2)
+
+    def test_repeated_seeding_stays_idempotent(self):
+        """The property the live database lost: no growth per run."""
+        rid = new_run_id()
+        self.store.start_run(rid, "x.csv", {})
+        self.store.record_url_rows(rid, [out_row(url=DS, prior=DS_WWW)])
+        for _ in range(4):
+            self.store.seed_baseline([sheet(url=DS_WWW)])
+        self.assertEqual(len(self.store.history_for("1")), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

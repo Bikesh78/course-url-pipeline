@@ -360,6 +360,7 @@ class Store:
         re-seeding after a later export does not duplicate rows.
         """
         from pipeline.catalog import clean_url
+        from pipeline.triage import same_page
 
         seeded = 0
         for row in rows:
@@ -370,10 +371,30 @@ class Store:
             if not url:
                 continue
             stamp = (row.get("processed_date") or "").strip() or now_iso()
-            cur = self.conn.execute(
-                "SELECT 1 FROM url_history WHERE course_id = ? AND url = ?",
-                (row["id"], url)).fetchone()
-            if cur:
+
+            # Match on the *page*, not the exact string. Matching exactly let
+            # this method re-insert a URL the fold in `_touch_history_values`
+            # had already collapsed: the sheet writes `www.x/y`, extraction
+            # finds `x/y`, the fold rewrites the row to the latter, and the
+            # next seeding no longer finds its own `www.` form and files it
+            # again. 89 courses had accumulated such a pair, one per run.
+            existing = None
+            for r in self.conn.execute(
+                    "SELECT url, first_seen FROM url_history "
+                    "WHERE course_id = ?", (row["id"],)):
+                if r["url"] == url or same_page(r["url"], url):
+                    existing = r
+                    break
+            if existing is not None:
+                # The page is already on record. Keep the earlier start date
+                # though: history exists to say when a URL was established,
+                # and the sheet's `processed_date` usually predates our run.
+                if stamp and (not existing["first_seen"]
+                              or stamp < existing["first_seen"]):
+                    self.conn.execute(
+                        "UPDATE url_history SET first_seen = ? "
+                        "WHERE course_id = ? AND url = ?",
+                        (stamp, row["id"], existing["url"]))
                 continue
             self.conn.execute(
                 "INSERT INTO url_history (course_id, url, first_seen, "
