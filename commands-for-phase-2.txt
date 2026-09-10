@@ -1,0 +1,19 @@
+Run the free replay first so today's cached rows land, then draw against the updated file:
+
+# 1. free: picks up your cd.edu.au row, spends nothing
+uv run python run.py --phase 2 --search-provider serper --search-limit 0
+
+# 2. refresh the exclusion list (now covers today's 25 + your query)
+uv run python tools/exclude_searched.py --out out/scratch/already_searched.txt
+
+# 3. draw 50 rows, one per institution
+uv run python tools/sample_search_targets.py \
+  --results out/courses_filled.csv \
+  --status no_catalog --status no_match \
+  --exclude out/scratch/already_searched.txt \
+  --limit 50 --per-site 1 \
+  --out out/scratch/batch3.txt
+
+# 4. spend at most 50 credits
+uv run python run.py --phase 2 --search-provider serper \
+  --search-ids out/scratch/batch3.txt --search-limit 50
