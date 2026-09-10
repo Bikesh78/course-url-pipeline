@@ -162,6 +162,28 @@ def _post_json(url: str, payload: dict, headers: dict,
             return e.code, {}
 
 
+def cache_path_for(query: str, num: int = MAX_RESULTS,
+                   cache_dir: str = SERPER_CACHE_DIR) -> str:
+    """Where a response for *query* is cached.
+
+    Module-level and public because the cache is deliberately un-indexed --
+    the path is derived from the query and never listed -- so anything wanting
+    to find an entry has to recompute it. `tools/find_cached_query.py` does,
+    and importing this is what stops the tool and the provider disagreeing
+    about where a file lives. A re-implementation would eventually drift and
+    fail the worst way available: reporting "not cached" for a file that is
+    right there.
+
+    `num` is part of the key because asking for five results and ten are
+    different questions. The `\x00` between them cannot occur in either field,
+    so `num=5` with `"0foo"` cannot collide with `num=50` and `"foo"` the way
+    plain concatenation would. `h[:2]` shards into 256 directories, because a
+    flat one holding ~20,000 entries degrades on many filesystems.
+    """
+    h = hashlib.sha1(f"{num}\x00{query}".encode("utf-8")).hexdigest()
+    return os.path.join(cache_dir, h[:2], h + ".json.gz")
+
+
 class SerperProvider:
     """Google results via Serper, over stdlib HTTP, cached on disk.
 
@@ -208,8 +230,7 @@ class SerperProvider:
 
     # ------------------------------------------------------------------ cache
     def _cache_path(self, query: str) -> str:
-        h = hashlib.sha1(f"{self.num}\x00{query}".encode("utf-8")).hexdigest()
-        return os.path.join(self.cache_dir, h[:2], h + ".json.gz")
+        return cache_path_for(query, self.num, self.cache_dir)
 
     def _read_cache(self, query: str) -> list[str] | None:
         path = self._cache_path(query)

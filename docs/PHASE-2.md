@@ -209,6 +209,22 @@ institution cleared the gate for 5 of 40 rows, while the bare name scoped by
 site word a course exactly as the sheet does, and the institution's *legal*
 name — "A2 Education Pty Ltd" — rarely appears in a course page's own text.
 
+### Inspecting what came back
+
+The cache is keyed by a hash of the query and never indexed, so an entry cannot
+be found with `ls`. `tools/find_cached_query.py` rebuilds the query, resolves
+the path, and shows each link with the two numbers that decided it — its
+`on_site` verdict and its `gate_score`:
+
+```bash
+uv run python tools/find_cached_query.py <course-id>
+uv run python tools/find_cached_query.py --name "Diploma of Business"
+```
+
+That answers the question people actually have, which is *why is this row still
+empty* — usually because every result scored below 0.55, as 216 of the trial's
+500 did.
+
 ### Continuing from a trial
 
 Two independent mechanisms, so a good result can be extended without redoing
