@@ -4,8 +4,8 @@ import os
 import unittest
 
 from pipeline.load import (
-    CourseRow, dedupe, group_by_institution, group_by_site, load_rows,
-    normalise_website,
+    CourseRow, _apply_flags, dedupe, group_by_institution, group_by_site,
+    is_year_level, load_rows, normalise_website,
 )
 
 CSV = "processed_courses.csv"
@@ -174,6 +174,86 @@ class TestForeignScoreGuard(unittest.TestCase):
         from pipeline.load import incoming_score_is_foreign
         self.assertFalse(incoming_score_is_foreign(""))
         self.assertFalse(incoming_score_is_foreign(None))
+
+
+class TestYearBandsAreNotCourses(unittest.TestCase):
+    """A school year band has no page of its own to find.
+
+    The school publishes a page per *section*, so the closest match is the
+    same page for every band inside it. Measured on one: the section page
+    scores 0.429 against the band name and its live `<h1>` scores 0.429 too,
+    both under the 0.55 floor. Searching these can only fail, and paying for
+    it dilutes the measured rate.
+    """
+
+    BANDS = [
+        "Secondary Junior 7-10",
+        "Primary Years 1-6",
+        "Secondary Senior Yrs 11-12 Boys & Girls",
+        "Senior Secondary (Year 11 & 12)",
+        "Junior Secondary (Years 7 to 10)",
+        "Primary (Kindergarten to Year 6)",
+        "Middle School Education (Years 7-10)",
+        "Secondary Year 10",
+        "Year 7",
+        "Grade 5",
+        "Pre-primary",
+    ]
+
+    def test_year_bands_are_flagged(self):
+        for name in self.BANDS:
+            self.assertTrue(is_year_level(name), name)
+
+    def test_the_flag_reaches_the_row(self):
+        row = CourseRow("1", "Secondary Junior 7-10", "A B Paterson College",
+                        "https://abpat.qld.edu.au")
+        _apply_flags(row)
+        self.assertIn("year_level_not_course", row.flags)
+
+
+class TestRealCoursesKeepTheirNumbers(unittest.TestCase):
+    """The regression fixture: every one of these was caught by the pattern
+    drafted without a qualification guard, and every one is provably a real
+    course -- extraction or the sheet had already found it a page, four of
+    them `verified`. A future widening must not start catching them again.
+    """
+
+    REAL = [
+        # age band the qualification teaches
+        "Teacher Training PGCE Primary (3-7)",
+        "Teacher Training PGCE Primary (5-11)",
+        "Primary Education (Later 5-11) with Foundation in Education",
+        "Bachelor of Education (Primary 1-10 Health and Physical Education)",
+        # plural forms -- `\bbachelor\b` does not match "Bachelors"
+        "Bachelors of Secondary Education - Life Science (6-12)",
+        "Bachelors of Secondary Education - Math (6-12)",
+        # duration in the name
+        "General English (1-50 weeks)",
+        "English for Secondary Schools (1-52 weeks)",
+        "IELTS Preparation Intermediate to Upper Intermediate (5-10 weeks)",
+        # entry year of a real programme
+        "BA(Hons) Business Management ( Year 1)",
+        "International year 2- BA (Hons) International Hospitality Management",
+        # university pathway programmes the old leading-keyword rule wrongly
+        # flagged; one of these is `verified` in the real data
+        "Foundation Year in Arts and Creative Industries",
+        "Foundation Year (Standard)",
+        "Year One Foundation Program",
+        "Foundation Year leading to BSc. (Hons) Biomedical Science",
+    ]
+
+    def test_none_of_them_is_treated_as_a_year_band(self):
+        for name in self.REAL:
+            self.assertFalse(is_year_level(name), name)
+
+    def test_a_plain_qualification_is_untouched(self):
+        for name in ("Diploma of Business", "Master of Teaching",
+                     "Certificate IV in Engineering"):
+            self.assertFalse(is_year_level(name), name)
+
+    def test_an_empty_name_is_not_a_year_band(self):
+        self.assertFalse(is_year_level(""))
+        self.assertFalse(is_year_level(None))
 
 
 if __name__ == "__main__":

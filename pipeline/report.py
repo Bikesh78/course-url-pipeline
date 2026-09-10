@@ -70,6 +70,11 @@ def phase_for(status: str, url: str) -> str:
 # decides from these rather than from whatever the last run delivered.
 PHASE_1_COLUMNS = ["phase1_course_url", "phase1_matched_status"]
 
+# Flags marking a row that names something other than a course, so no stage
+# can fill it. Kept beside the report because this is where the distinction
+# between "excluded" and "failed" has to be visible.
+NON_COURSE_FLAGS = {"occupation_code_not_course", "year_level_not_course"}
+
 OUTPUT_COLUMNS = INPUT_COLUMNS + ["match_margin", "live_page_score",
                                   "match_evidence", "row_flags"] + \
     PROVENANCE_COLUMNS + ["phase"] + PHASE_1_COLUMNS
@@ -226,8 +231,26 @@ def write_coverage_report(results: list[MatchResult], catalog_health: dict,
     a("")
     a("## Headline")
     a("")
+    # Rows no pipeline stage can ever fill: ANZSCO occupation codes, school
+    # year bands, and the like. Counting them in the denominator understates
+    # coverage against the work actually available -- 5,014 occupation codes
+    # alone put the headline 5.4 points below the achievable figure -- and it
+    # makes "excluded" indistinguishable from "failed".
+    non_course = sum(1 for r in results
+                     if NON_COURSE_FLAGS & set(r.row.flags + r.flags))
+    answerable = total - non_course
+
     a(f"- Course Rows processed: **{total}**")
     a(f"- `course_url` filled: **{filled}** ({100 * filled / max(1, total):.1f}%)")
+    if non_course:
+        a(f"- Of those, rows no stage can fill: **{non_course}** — "
+          f"occupation codes and school year bands, which have no course page "
+          f"to find. They are flagged, not silently dropped; see Row flags "
+          f"below.")
+        a(f"- **Coverage against answerable rows: "
+          f"{100 * filled / max(1, answerable):.1f}%** "
+          f"({filled} of {answerable}) — the figure to judge the pipeline by, "
+          f"since the excluded rows can only ever be blank.")
     a(f"- Rows in Institutions whose Catalog failed Extraction Health: "
       f"**{no_catalog_rows}** ({100 * no_catalog_rows / max(1, total):.1f}%)")
     a(f"- Rows a previous manual pass called `not found` where a URL was "

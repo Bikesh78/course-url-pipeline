@@ -40,7 +40,8 @@ from pipeline.load import (DEFAULT_INPUT, dedupe, group_by_site,
                            normalise_website, site_display_name)
 from pipeline.match import FLOOR, MatchResult, Thresholds, assign
 from pipeline.normalize import score as score_pair
-from pipeline.report import (DEFAULT_OUT_DIR, PHASE_1_COLUMNS, phase_for,
+from pipeline.report import (DEFAULT_OUT_DIR, NON_COURSE_FLAGS,
+                             PHASE_1_COLUMNS, phase_for,
                              write_calibration_sample, write_coverage_report,
                              write_filled_csv, write_review_queue)
 
@@ -739,11 +740,14 @@ def main(argv: list[str] | None = None) -> int:
     # site, which no crawl can resolve; ranking on it would spend the first
     # --limit slot on guaranteed waste. Nothing is skipped — a full run still
     # covers every bucket.
-    NON_COURSE = {"occupation_code_not_course", "year_level_not_course"}
-
     def course_rows(rs):
-        """Rows in a bucket that are plausibly courses at all."""
-        return sum(1 for r in rs if not (NON_COURSE & set(r.flags)))
+        """Rows in a bucket that are plausibly courses at all.
+
+        Uses `report.NON_COURSE_FLAGS`, the same set the coverage report
+        excludes from its answerable-rows figure, so ranking and reporting
+        cannot disagree about what counts as a course.
+        """
+        return sum(1 for r in rs if not (NON_COURSE_FLAGS & set(r.flags)))
 
     ranked = sorted(by_site.items(),
                     key=lambda kv: (-course_rows(kv[1]), -len(kv[1]), kv[0]))

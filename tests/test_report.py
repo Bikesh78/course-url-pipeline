@@ -8,7 +8,8 @@ import unittest
 from pipeline.catalog import Candidate
 from pipeline.load import CourseRow
 from pipeline.match import MatchResult
-from pipeline.report import (OUTPUT_COLUMNS, PHASE_2_STATUSES,
+from pipeline.report import (NON_COURSE_FLAGS, OUTPUT_COLUMNS,
+                             PHASE_2_STATUSES,
                              phase_for, write_coverage_report,
                              write_filled_csv)
 from pipeline.search import SEARCH_FOUND
@@ -216,6 +217,49 @@ class TestPhaseNeverDisagreesWithStatus(unittest.TestCase):
         for row in self.written(results):
             expected = phase_for(row["matched_status"], row["course_url"])
             self.assertEqual(row["phase"], expected)
+
+
+class TestAnswerableCoverage(unittest.TestCase):
+    """Excluded must read differently from failed.
+
+    5,014 occupation codes and ~584 year bands sit in the denominator today,
+    putting the headline 5.4 points below the coverage actually achievable and
+    making a row nothing can fill look like a row we failed on.
+    """
+
+    def results(self, filled=1, non_course=1, flag="year_level_not_course"):
+        out = rows("Inst", filled, filled=filled)
+        for r in rows("Band", non_course, filled=0):
+            r.row.flags.append(flag)
+            out.append(r)
+        return out
+
+    def render_report(self, results):
+        return render(results, {})
+
+    def test_it_reports_coverage_against_answerable_rows(self):
+        text = self.render_report(self.results(filled=1, non_course=1))
+        self.assertIn("Coverage against answerable rows: 100.0%", text)
+        self.assertIn("`course_url` filled: **1** (50.0%)", text)
+
+    def test_it_names_how_many_cannot_be_filled(self):
+        text = self.render_report(self.results(filled=2, non_course=3))
+        self.assertIn("rows no stage can fill: **3**", text)
+
+    def test_occupation_codes_count_too(self):
+        rs = self.results(filled=1, non_course=1,
+                          flag="occupation_code_not_course")
+        self.assertIn("rows no stage can fill: **1**", self.render_report(rs))
+
+    def test_the_line_is_omitted_when_every_row_is_answerable(self):
+        """No excluded rows, no second figure to explain."""
+        text = self.render_report(self.results(filled=2, non_course=0))
+        self.assertNotIn("answerable", text)
+
+    def test_ranking_and_reporting_share_one_definition(self):
+        """`run.course_rows` must exclude exactly what the report excludes."""
+        import run
+        self.assertIs(run.NON_COURSE_FLAGS, NON_COURSE_FLAGS)
 
 
 if __name__ == "__main__":

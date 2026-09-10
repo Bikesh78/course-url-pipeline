@@ -54,9 +54,55 @@ _K12_INSTITUTION = re.compile(
     r"\b(primary\s+school|secondary\s+college|secondary\s+school|high\s+school"
     r"|infants?\s+school|p-\d+\s+college|primary\s+&?\s*secondary)\b",
     re.IGNORECASE)
-_YEAR_LEVEL = re.compile(
-    r"^\s*(year|grade|prep|kindergarten|kinder|foundation\s+year)\b"
-    r"|^\s*year\s+level\s*:", re.IGNORECASE)
+# A school year band -- "Secondary Junior 7-10", "Primary Years 1-6" -- is not
+# a course, and no institution publishes a page for one: the school has a page
+# per *section*, so the closest match is the same page for every band it
+# contains. Measured on one: the section page scores 0.429 against the band's
+# name and its live `<h1>` scores 0.429 too, both under the 0.55 floor. Search
+# cannot succeed here, so paying for it only dilutes the measured rate.
+_YEAR_BAND = re.compile(
+    r"^\s*(year|grade|prep|kindergarten|kinder)\b"
+    r"|^\s*year\s+level\s*:"
+    r"|\b(years?|yrs?|grades?)\s*\d"          # "Years 7-10", "Yrs 11-12"
+    r"|\bpre-?primary\b|\bkindergarten\b|\bprep\b"
+    r"|\b\d{1,2}\s*[-–]\s*\d{1,2}\b",       # a bare span: "7-10"
+    re.IGNORECASE)
+
+# ...but a number range in a name is not enough on its own. Real
+# qualifications carry them constantly: `PGCE Primary (5-11)` is the age band
+# it qualifies you to teach, `General English (1-50 weeks)` a duration,
+# `Bachelor of Education (Primary 1-10 …)` a curriculum span. Requiring the
+# *absence* of any qualification word is what separates the two.
+#
+# Drafted without this guard, the band pattern caught 76 rows that extraction
+# or the sheet had already found pages for -- including four `verified` -- so
+# every one of them was demonstrably a real course.
+_QUALIFICATION = re.compile(
+    r"\b(diplomas?|certificates?|cert\s*(i{1,3}|iv)\b|bachelors?|masters?"
+    r"|doctor(ate)?s?|phd|associates?|advanced|graduates?|postgraduate"
+    r"|undergraduate|honours|hons|b\.?(a|sc|ed|eng|com|bus)\b"
+    r"|m\.?(a|sc|ed|eng|ba)\b|pgce|pgdip|mba|degrees?|foundation"
+    r"|traineeships?|apprenticeships?|courses?|english|programmes?|programs?"
+    r"|ielts|toefl|pte\b|preparation|pathways?)\b"
+    r"|\(\s*\d+\s*[-–]\s*\d+\s*(weeks?|months?)\s*\)",
+    re.IGNORECASE)
+
+
+def is_year_level(name: str) -> bool:
+    """Is *name* a school year band rather than a course?
+
+    Both halves are required. The plural forms matter more than they look:
+    `\bbachelor\b` does not match "Bachelors", which let three
+    `Bachelors of Secondary Education - Life Science (6-12)` degrees through
+    while the guard was being drafted.
+
+    Note this deliberately no longer flags `Foundation Year …`, which the
+    earlier leading-keyword pattern did. Those are university pathway
+    programmes, and seven were caught -- one `verified`, two more filled -- so
+    they are real courses that were being excluded by mistake.
+    """
+    return bool(_YEAR_BAND.search(name or "")) and not _QUALIFICATION.search(
+        name or "")
 # ANZSCO occupation codes from the Department of Home Affairs, e.g.
 # "Aboriginal and Torres Strait Islander Health Worker - 411511 (subclass 186)".
 # 5,083 rows (9.6% of the sheet) are skilled-migration occupations rather than
@@ -347,7 +393,7 @@ def _apply_flags(row: CourseRow) -> None:
     """Attach Row Flags explaining why a weak or absent result is expected."""
     if _K12_INSTITUTION.search(row.institution_name):
         row.flags.append("k12_institution")
-    if _YEAR_LEVEL.search(row.name):
+    if is_year_level(row.name):
         row.flags.append("year_level_not_course")
     subject = normalize_name(row.name, drop_awards=True)
     if not subject or row.name.strip().lower() in BARE_CREDENTIALS:
