@@ -24,12 +24,25 @@ logs/
 # the repo root untracked and unignored.
 *.log
 
-# Every generated artefact. One rule for the directory, so a new output kind
-# needs no new entry here -- 87 per-chunk files once accumulated in the repo
-# root, which buried the one CSV this repo actually tracks.
-out/
+# Every generated artefact, exhaustively -- 87 per-chunk files once accumulated
+# in the repo root, which buried the one CSV this repo actually tracks. A new
+# output kind therefore needs no new entry here.
+#
+# The star is load-bearing: `out/` would exclude the *directory*, and git does
+# not descend into an excluded directory, so the negation below would silently
+# do nothing. `out/*` excludes the contents individually, which is what makes a
+# single file re-includable. Restoring the bare `out/` breaks the tracking with
+# no error to show you.
+out/*
 
-# Named for documentation rather than effect -- `out/` above already covers it.
+# The one exception, and the only expensive artefact here: hours of crawling to
+# regenerate, where everything else under out/ is disposable or takes seconds.
+# 22.5MB on disk, ~3.1MB per committed revision. Commit it at milestones, not
+# after every run.
+!out/courses_filled.csv
+
+# Named for documentation rather than effect -- `out/*` above matches this as a
+# directory already.
 # The convention: `out/` holds deliverables, `out/scratch/` holds verification
 # runs, which produce files indistinguishable in shape from real output. Pass
 # `--out-dir out/scratch` for anything disposable, so the directory can be
@@ -43,15 +56,21 @@ catalogs.baseline/
 *.csv.bak
 
 # Legacy output locations, kept so a checkout predating out/ stays clean.
-courses_filled.csv
-courses_filled.*.csv
-review_queue.csv
-review_queue.*.csv
-coverage_report.md
-coverage_report.*.md
-calibration_sample.csv
-calibration_sample.*.csv
-phase2*.csv
+#
+# Anchored with a leading `/` because these mean "in the repo root" and a
+# pattern without a slash matches at every depth: unanchored,
+# `courses_filled.csv` also matched `out/courses_filled.csv` and quietly
+# defeated the negation above. Nothing is lost by anchoring -- `out/*` already
+# covers every direct child of out/.
+/courses_filled.csv
+/courses_filled.*.csv
+/review_queue.csv
+/review_queue.*.csv
+/coverage_report.md
+/coverage_report.*.md
+/calibration_sample.csv
+/calibration_sample.*.csv
+/phase2*.csv
 
 # Local secrets. The API key must never be committed, and broad staging in
 # this repo is not hypothetical -- eaabf6f swept in 30MB of stray files.
