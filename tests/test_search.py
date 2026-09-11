@@ -8,10 +8,10 @@ import tempfile
 import unittest
 import unittest.mock
 
-from pipeline.search import (MAX_CONSECUTIVE_ERRORS, SEARCH_FOUND,
-                             SERPER_ENDPOINT, FixtureProvider, NullProvider,
-                             SearchProviderError, SerperProvider, build_query,
-                             _post_json, is_searchable,
+from pipeline.search import (EVICTION_MARGIN, MAX_CONSECUTIVE_ERRORS,
+                             SEARCH_FOUND, SERPER_ENDPOINT, FixtureProvider,
+                             NullProvider, SearchProviderError, SerperProvider,
+                             build_query, _post_json, is_searchable,
                              links_from_entry, on_site, read_cache_entry,
                              search_rows, searchable_rows)
 from pipeline.load import _host_of
@@ -213,6 +213,110 @@ class TestSharingGuard(unittest.TestCase):
         self.assertEqual((stats.adopted, stats.rejected_by_sharing), (1, 1))
         self.assertEqual(rows[0]["course_url"], DS)
         self.assertEqual(rows[1]["course_url"], "")
+
+
+class TestAPageCanChangeHands(unittest.TestCase):
+    """Placement is first-come-wins; a clearly better claim re-contests it.
+
+    The measured failure: `Bachelor of Commerce` scored 1.0000 against its own
+    page and stayed empty, because `Bachelor of Biomedicine` -- carried over
+    from the source sheet at 0.5720 -- reached it first. The sharing rule was
+    right to refuse a second holder; nothing asked whether the first one
+    should still have it.
+    """
+
+    # 1.0000 against the Data Science page. 0.1083. Not Variant Siblings, so
+    # the sharing rule refuses and the re-contest is what decides.
+    WINNER = "Data Science"
+    WEAK_HOLDER = "Anthropology"
+    # 0.7208 and 0.6790: a gap of 0.042, well inside the margin.
+    NARROW_WINNER = "Applied Data Science"
+    NARROW_HOLDER = "Data Science and Statistics"
+
+    def test_a_far_better_match_takes_the_page(self):
+        rows = [row("1", self.WEAK_HOLDER, url=DS, status="carried_over"),
+                row("2", self.WINNER)]
+        stats, _ = run(rows, {query(self.WINNER): [DS]})
+        self.assertEqual(rows[1]["course_url"], DS)
+        self.assertEqual(rows[1]["matched_status"], SEARCH_FOUND)
+        self.assertEqual((stats.adopted, stats.evicted), (1, 1))
+        self.assertEqual(stats.rejected_by_sharing, 0)
+
+    def test_the_loser_is_left_honest_not_merely_blank(self):
+        """A row that lost a page must not read as though nothing matched."""
+        rows = [row("1", self.WEAK_HOLDER, url=DS, status="carried_over"),
+                row("2", self.WINNER)]
+        rows[0]["phase1_matched_status"] = "no_catalog"
+        rows[0]["matched_score"] = "0.1083"
+        run(rows, {query(self.WINNER): [DS]})
+        self.assertEqual(rows[0]["course_url"], "")
+        self.assertEqual(rows[0]["matched_status"], "no_catalog")
+        self.assertEqual(rows[0]["matched_score"], "")
+        self.assertIn("url_lost_to_better_match", rows[0]["row_flags"])
+
+    def test_the_winner_does_not_end_up_sharing_with_the_loser(self):
+        """Eviction must leave exactly one holder, or it solved nothing."""
+        rows = [row("1", self.WEAK_HOLDER, url=DS, status="carried_over"),
+                row("2", self.WINNER)]
+        run(rows, {query(self.WINNER): [DS]})
+        self.assertEqual([r["id"] for r in rows if r["course_url"] == DS],
+                         ["2"])
+
+    def test_a_narrow_win_is_not_enough(self):
+        rows = [row("1", self.NARROW_HOLDER, url=DS, status="carried_over"),
+                row("2", self.NARROW_WINNER)]
+        stats, _ = run(rows, {query(self.NARROW_WINNER): [DS]})
+        self.assertEqual((stats.evicted, stats.rejected_by_sharing), (0, 1))
+        self.assertEqual(rows[0]["course_url"], DS)
+        self.assertIn("search_denied_sharing", rows[1]["row_flags"])
+
+    def test_a_crawled_holder_is_never_evicted(self):
+        """`verified` rests on reading the site, not on scoring a slug."""
+        for status in ("verified", "probable"):
+            with self.subTest(status=status):
+                rows = [row("1", self.WEAK_HOLDER, url=DS, status=status),
+                        row("2", self.WINNER)]
+                stats, _ = run(rows, {query(self.WINNER): [DS]})
+                self.assertEqual(stats.evicted, 0)
+                self.assertEqual(rows[0]["course_url"], DS)
+                self.assertEqual(rows[1]["course_url"], "")
+
+    def test_a_search_result_may_be_taken_as_well(self):
+        """Both statuses rest on the same evidence, so both are contestable."""
+        rows = [row("1", self.WEAK_HOLDER, url=DS, status=SEARCH_FOUND),
+                row("2", self.WINNER)]
+        stats, _ = run(rows, {query(self.WINNER): [DS]})
+        self.assertEqual(stats.evicted, 1)
+        self.assertEqual(rows[1]["course_url"], DS)
+
+    def test_one_unbeatable_holder_protects_the_whole_page(self):
+        """Taking it from some holders would leave the winner sharing anyway."""
+        rows = [row("1", self.WEAK_HOLDER, url=DS, status="carried_over"),
+                row("2", self.NARROW_HOLDER, url=DS, status="verified"),
+                row("3", self.WINNER)]
+        stats, _ = run(rows, {query(self.WINNER): [DS]})
+        self.assertEqual((stats.evicted, stats.rejected_by_sharing), (0, 1))
+        self.assertEqual(rows[0]["course_url"], DS)
+        self.assertEqual(rows[2]["course_url"], "")
+
+    def test_searching_again_changes_nothing(self):
+        """The stage must be a fixed point once a page has changed hands.
+
+        A re-contest that re-fires would hand the page back and forth between
+        runs, which is the failure mode this design is most exposed to.
+        """
+        rows = [row("1", self.WEAK_HOLDER, url=DS, status="carried_over"),
+                row("2", self.WINNER)]
+        fixtures = {query(self.WINNER): [DS], query(self.WEAK_HOLDER): [DS]}
+        run(rows, fixtures)
+        before = [dict(r) for r in rows]
+        stats, _ = run(rows, fixtures)
+        self.assertEqual((stats.adopted, stats.evicted), (0, 0))
+        self.assertEqual(rows, before)
+
+    def test_the_margin_is_stated_once(self):
+        """A number this consequential belongs in one place, not inline."""
+        self.assertGreater(EVICTION_MARGIN, 0.0)
 
 
 class TestWhatAnAdoptedRowCarries(unittest.TestCase):

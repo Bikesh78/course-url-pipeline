@@ -238,6 +238,30 @@ class ShareIndex:
         """Would filing *url* against *name* break the sharing rule on *site*?"""
         return _sharing_would_break(url, name, self.by_site[site], self.names)
 
+    def holders_of(self, site: str, url: str) -> list[tuple[str, str]]:
+        """Who currently holds *url* on *site*, as `(id, name)` pairs.
+
+        `would_break` answers "may this row have the page"; this answers "who
+        has it, and are they a better claim than the one being refused". The
+        two are deliberately separate: triage and the manual overlay want only
+        the verdict, and giving them the holders would invite comparing scores
+        in a stage where placement order, not score, decides -- see the
+        re-contest note in `search.search_rows`.
+        """
+        return [(rid, self.names.get(rid, ""))
+                for rid in self.by_site[site].get(url, ())]
+
+    def release(self, site: str, url: str, rid: str) -> None:
+        """Drop *rid*'s hold on *url*, the counterpart to `move`.
+
+        Used when a page is taken from a weaker holder: the loser must leave
+        the index in the same pass, or the sharing rule would still count it
+        and refuse the winner it just made room for.
+        """
+        holders = self.by_site[site]
+        if rid in holders.get(url, ()):
+            holders[url].remove(rid)
+
     def move(self, site: str, old_url: str, new_url: str, rid: str) -> None:
         """Reassign *rid* from *old_url* to *new_url*, so later rows see it."""
         holders = self.by_site[site]

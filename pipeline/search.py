@@ -53,12 +53,27 @@ from pipeline.catalog import clean_url
 from pipeline.fetch import registrable
 from pipeline.load import _host_of
 from pipeline.match import FLOOR
-from pipeline.statuses import SEARCH_FOUND
+from pipeline.statuses import CARRIED_OVER, SEARCH_FOUND
 from pipeline.triage import (ShareIndex, add_flag, classify_change,
-                            gate_score)
+                            gate_score, phase1_status)
 
 # Flags marking rows for which no course page can exist.
 UNSEARCHABLE_FLAGS = ("occupation_code_not_course", "year_level_not_course")
+
+# Statuses whose hold on a page may be taken by a clearly better match.
+#
+# Both rest on `gate_score` against a URL slug -- exactly what a challenger
+# offers -- so comparing the two numbers is apples-to-apples. `verified` and
+# `probable` are deliberately absent: those come from reading the
+# Institution's own catalog, which is a different and stronger kind of
+# evidence, and a slug score must not overturn it however wrong a given row
+# looks.
+EVICTABLE_STATUSES = (CARRIED_OVER, SEARCH_FOUND)
+
+# How far a challenger must beat the current holder before taking its page.
+# Measured on the 25 real displacements: the gaps cluster at 0.26-0.43, so
+# this keeps near-ties out rather than admitting anything borderline.
+EVICTION_MARGIN = 0.15
 
 # The sheet marks a retired record by prefixing the *institution* name --
 # "(Inactive) Fleming College Toronto". Never the course name: 0 course names
@@ -460,10 +475,54 @@ class SearchStats:
     rejected_off_site: int = 0
     rejected_by_gate: int = 0
     rejected_by_sharing: int = 0
+    # Pages taken from a weaker holder. Counted separately from `adopted`
+    # because it moves a URL *between* courses rather than filling a blank,
+    # and a number that does that must never be silent.
+    evicted: int = 0
     # Set when a provider failure stopped the stage early. The rows adopted
     # before that point are kept: a broken vendor is no reason to discard
     # triage's work, but it must not be reported as a clean run either.
     aborted: str = ""
+
+
+def _release_page(row: dict) -> None:
+    """Undo a row's claim on a page it just lost, leaving it honest.
+
+    The row must not be left looking like it never matched: its status goes
+    back to what extraction actually concluded, the scores that justified the
+    lost URL are cleared, and `url_lost_to_better_match` records that a
+    stronger claim took the page rather than that nothing was found.
+    """
+    prior = (row.get("prior_course_url") or "").strip()
+    row["course_url"] = ""
+    row["matched_status"] = phase1_status(row)
+    row["matched_score"] = ""
+    row["match_margin"] = ""
+    row["match_evidence"] = ""
+    row["url_change"] = classify_change(prior, "")
+    add_flag(row, "url_lost_to_better_match")
+
+
+def _evictable(holders: list[tuple[str, str]], by_id: dict[str, dict],
+               url: str, score: float, inst: str) -> list[dict] | None:
+    """The holder rows a challenger scoring *score* may take *url* from.
+
+    `None` means the page stays where it is -- which is the answer whenever a
+    *single* holder is unbeatable, because taking a page from some holders and
+    not others would leave the challenger sharing with exactly the rows the
+    sharing rule refused it.
+    """
+    losers = []
+    for rid, hname in holders:
+        held = by_id.get(rid)
+        if held is None:
+            return None
+        if (held.get("matched_status") or "").strip() not in EVICTABLE_STATUSES:
+            return None
+        if score < gate_score(hname, url, inst) + EVICTION_MARGIN:
+            return None
+        losers.append(held)
+    return losers or None
 
 
 def search_rows(rows: list[dict], provider: SearchProvider,
@@ -482,13 +541,28 @@ def search_rows(rows: list[dict], provider: SearchProvider,
        order is a tiebreak only.
     3. The existing 0.55 floor, the same one extraction and triage answer to.
     4. The sharing rule, against the *shared* index, so a page triage already
-       carried over cannot be handed to a second course as well.
+       carried over cannot be handed to a second course as well -- unless
+       every current holder is beatable, in which case the page changes hands
+       (see `_evictable`). Placement is otherwise first-come-wins, and the
+       rule as written refused a 1.0000 match in favour of a 0.5720 one that
+       merely arrived earlier.
 
     `url_change` is recomputed on every acceptance. Triage writes that column
     before this stage runs, so a row filled here would otherwise keep a stale
     `none`/`dropped` while carrying a URL.
+
+    **An eviction settles over two runs, not one.** Triage has already run by
+    the time a page changes hands here, so anything that becomes legal because
+    of the eviction is only picked up by the *next* run's triage: the loser
+    re-offers its sheet URL and collects `adoption_denied_sharing`, and a
+    Variant Sibling of the winner may adopt the freed page. Measured on the 11
+    real evictions -- run 2 differs from run 1 in 12 rows, and runs 2, 3 and 4
+    are byte-identical. This stage is a fixed point on its own; the two-run
+    settle is the cost of deciding in file order in one pass rather than
+    re-running triage inside it.
     """
     stats = SearchStats()
+    by_id = {r["id"]: r for r in rows}
 
     for r in searchable_rows(rows, only_ids):
         site = _host_of(r.get("website", ""))
@@ -530,9 +604,22 @@ def search_rows(rows: list[dict], provider: SearchProvider,
 
         url = clean_url(best)
         if index.would_break(site, url, name):
-            stats.rejected_by_sharing += 1
-            add_flag(r, "search_denied_sharing")
-            continue
+            # Placement is first-come-wins, and nothing re-contested a page
+            # when a better claimant turned up later: `Bachelor of Commerce`
+            # scored 1.0000 against its own page and stayed empty because
+            # `Bachelor of Biomedicine` reached it first at 0.5720. The
+            # sharing rule is right to refuse a second holder; what was
+            # missing is asking whether the *first* one should still have it.
+            losers = _evictable(index.holders_of(site, url), by_id, url,
+                                best_score, inst)
+            if losers is None:
+                stats.rejected_by_sharing += 1
+                add_flag(r, "search_denied_sharing")
+                continue
+            for held in losers:
+                _release_page(held)
+                index.release(site, url, held["id"])
+            stats.evicted += len(losers)
 
         r["course_url"] = url
         r["matched_status"] = SEARCH_FOUND

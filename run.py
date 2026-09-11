@@ -470,6 +470,9 @@ def run_phase2(args, run_id: str, log) -> int:
              f"off-site, {ss.rejected_by_gate} by quality gate, "
              f"{ss.rejected_by_sharing} by the sharing rule; "
              f"{ss.no_results} returned nothing)"
+             # Never silent: this one moved a URL from one course to another.
+             + (f"; {ss.evicted} page(s) taken from weaker holders"
+                if ss.evicted else "")
              + (f" [{detail}]" if detail else "")
              + ("" if args.search_fixture or args.search_provider != "null"
                 else " — no vendor configured, see docs/PHASE-2.md")
@@ -479,6 +482,7 @@ def run_phase2(args, run_id: str, log) -> int:
                     "search_off_site": ss.rejected_off_site,
                     "search_rejected_gate": ss.rejected_by_gate,
                     "search_rejected_sharing": ss.rejected_by_sharing,
+                    "search_evicted": ss.evicted,
                     "provider": type(provider).__name__,
                     "search_aborted": bool(aborted)})
 
