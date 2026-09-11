@@ -73,7 +73,8 @@ PHASE_1_COLUMNS = ["phase1_course_url", "phase1_matched_status"]
 # Flags marking a row that names something other than a course, so no stage
 # can fill it. Kept beside the report because this is where the distinction
 # between "excluded" and "failed" has to be visible.
-NON_COURSE_FLAGS = {"occupation_code_not_course", "year_level_not_course"}
+NON_COURSE_FLAGS = {"occupation_code_not_course", "year_level_not_course",
+                    "test_booking_not_course"}
 
 OUTPUT_COLUMNS = INPUT_COLUMNS + ["match_margin", "live_page_score",
                                   "match_evidence", "row_flags"] + \

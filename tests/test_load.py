@@ -5,7 +5,7 @@ import unittest
 
 from pipeline.load import (
     CourseRow, _apply_flags, dedupe, group_by_institution, group_by_site,
-    is_year_level, load_rows, normalise_website,
+    is_test_booking, is_year_level, load_rows, normalise_website,
 )
 
 CSV = "processed_courses.csv"
@@ -209,6 +209,56 @@ class TestYearBandsAreNotCourses(unittest.TestCase):
                         "https://abpat.qld.edu.au")
         _apply_flags(row)
         self.assertIn("year_level_not_course", row.flags)
+
+
+class TestSittingATestIsNotACourse(unittest.TestCase):
+    """Decided by the Institution's domain, never by the course name.
+
+    The sheet carries one booking row per country office -- 14 to 16
+    duplicates of "IELTS Academic Online Booking" -- and no per-course page
+    can exist for any of them. Where they were filled, 54 rows shared 6 URLs.
+    """
+
+    def booking(self, site, name="IELTS Academic Online Booking"):
+        return CourseRow("1", name, "British Council", site)
+
+    def test_a_booking_row_is_flagged(self):
+        self.assertTrue(is_test_booking(
+            {"website": "https://takeielts.britishcouncil.org/"}))
+
+    def test_every_administrator_is_covered(self):
+        for site in ("https://www.ets.org/", "https://www.duolingo.com/",
+                     "https://www.pearsonpte.com/", "https://www.idp.com/",
+                     "https://www.collegeboard.org/"):
+            self.assertTrue(is_test_booking({"website": site}), site)
+
+    def test_a_college_teaching_the_same_exam_is_untouched(self):
+        """286 such rows fill at 26% -- the general rate. They are courses."""
+        for site in ("https://www.languageacademy.com.au/",
+                     "https://apc.edu.au/", "https://ptestudycentre.com.au/"):
+            self.assertFalse(is_test_booking({"website": site}), site)
+
+    def test_the_course_name_is_never_consulted(self):
+        """A name rule would drop `IELTS Preparation` at a real college."""
+        self.assertFalse(is_test_booking(
+            {"website": "https://www.languageacademy.com.au/",
+             "name": "IELTS Preparation"}))
+
+    def test_the_sheet_s_own_typo_is_still_caught(self):
+        """`IETLS` is misspelled in the data; the domain does not care."""
+        self.assertTrue(is_test_booking(
+            {"website": "https://takeielts.britishcouncil.org/",
+             "name": "IETLS Academic Online Booking"}))
+
+    def test_it_accepts_a_course_row_as_well_as_a_dict(self):
+        """Phase 1 flags from a CourseRow; phase 2 re-checks from a dict."""
+        self.assertTrue(is_test_booking(
+            self.booking("https://takeielts.britishcouncil.org/")))
+
+    def test_the_flag_reaches_the_row(self):
+        row = self.booking("https://takeielts.britishcouncil.org/")
+        _apply_flags(row)
+        self.assertIn("test_booking_not_course", row.flags)
 
 
 class TestRealCoursesKeepTheirNumbers(unittest.TestCase):

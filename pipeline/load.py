@@ -103,6 +103,52 @@ def is_year_level(name: str) -> bool:
     """
     return bool(_YEAR_BAND.search(name or "")) and not _QUALIFICATION.search(
         name or "")
+
+
+# Sites whose business is *administering* a test, not teaching a course. A row
+# here names an exam sitting -- "IELTS Academic Online Booking", "GRE Paper
+# Based Booking" -- and the sheet carries one per country office, so 14-16
+# duplicates of each.
+#
+# Why the domain and not the course name, which is the edit this invites:
+# "IELTS Preparation" taught by a language college is a real course and fills
+# at **26%**, the same rate as the general population, across 286 rows. On
+# these domains the rate is **1%** (1 of 122). A name rule on ielts/gre/
+# duolingo would silently drop all 286 real courses; the domain rule drops
+# none of them.
+#
+# The domain also survives the sheet's own typos -- `IETLS Academic Online
+# Booking` is misspelled and no \bielts\b pattern would match it.
+#
+# What these rows do when left in: 54 of them that *were* filled share just 6
+# URLs, `pearsonpte.com/pte-academic` stamped on 15 at once. That is the
+# one-page-many-courses collapse ADR-0004 prevents, admitted only because
+# identical duplicate names read as Variant Siblings.
+_TEST_ADMINISTRATOR = frozenset({
+    "ets.org",              # TOEFL, GRE
+    "britishcouncil.org",   # IELTS
+    "idp.com",              # IELTS
+    "pearsonpte.com",       # PTE
+    "collegeboard.org",     # SAT
+    "duolingo.com",
+    "cambridgeenglish.org",
+    "gmac.com", "mba.com",  # GMAT
+    "oet.com",
+})
+
+
+def is_test_booking(row) -> bool:
+    """Is this row an exam sitting rather than a course?
+
+    Decided by the Institution's own domain, never by the course name -- see
+    `_TEST_ADMINISTRATOR` for the measurement behind that.
+
+    Takes either a `CourseRow` or an output-CSV dict, because the flag is
+    written during phase 1 from the former and the search gate re-checks it
+    during phase 2 from the latter.
+    """
+    site = row.get("website", "") if isinstance(row, dict) else row.website
+    return _host_of(site) in _TEST_ADMINISTRATOR
 # ANZSCO occupation codes from the Department of Home Affairs, e.g.
 # "Aboriginal and Torres Strait Islander Health Worker - 411511 (subclass 186)".
 # 5,083 rows (9.6% of the sheet) are skilled-migration occupations rather than
@@ -395,6 +441,8 @@ def _apply_flags(row: CourseRow) -> None:
         row.flags.append("k12_institution")
     if is_year_level(row.name):
         row.flags.append("year_level_not_course")
+    if is_test_booking(row):
+        row.flags.append("test_booking_not_course")
     subject = normalize_name(row.name, drop_awards=True)
     if not subject or row.name.strip().lower() in BARE_CREDENTIALS:
         row.flags.append("bare_credential_name")

@@ -17,16 +17,13 @@ stay searchable forever and would be re-drawn first by the round robin. They
 cost nothing to re-query -- the cache answers them -- but a batch made of them
 measures nothing, while reporting a full 25 rows queried.
 
-Why year bands are in the same list
------------------------------------
-`is_year_level` (pipeline/load.py) decides a name like "Secondary Junior 7-10"
-names no course, and `pipeline/load.py` flags such rows so `is_searchable`
-refuses them. But that flagging happens during **phase 1**, while phase 2 reads
-an existing result file: `out/courses_filled.csv` carries the flag on 54 rows
-against 584 searchable rows the predicate actually matches, because phase 1 has
-not re-run since the rule was added. Recomputing the predicate here honours the
-decision now instead of waiting for a re-crawl. See ADR-0010 for why these rows
-are left to a person rather than to search.
+What this tool no longer does
+-----------------------------
+It used to re-derive the year-band rule as well, because the flag for it is
+written during phase 1 and phase 2 reads an existing result file, so 530 school
+year bands were still searchable. `is_searchable` now checks that predicate
+itself, along with the test-booking one, so this tool is back to its single
+question: what has already been paid for.
 
 Usage
 -----
@@ -45,7 +42,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pipeline.load import _host_of, is_year_level  # noqa: E402
+from pipeline.load import _host_of  # noqa: E402
 from pipeline.report import DEFAULT_OUT_DIR  # noqa: E402
 from pipeline.search import (build_query, cache_path_for,  # noqa: E402
                              searchable_rows)
@@ -66,19 +63,9 @@ def already_paid(row: dict) -> bool:
     return os.path.exists(cache_path_for(query))
 
 
-def classify(rows: list[dict]) -> tuple[list[str], int, int, int]:
-    """Ids to exclude, plus the counts behind them for the report."""
-    excluded, paid, bands, both = [], 0, 0, 0
-    for r in searchable_rows(rows):
-        is_paid = already_paid(r)
-        is_band = is_year_level(r.get("name", ""))
-        if not (is_paid or is_band):
-            continue
-        excluded.append(r["id"])
-        paid += is_paid
-        bands += is_band
-        both += is_paid and is_band
-    return excluded, paid, bands, both
+def classify(rows: list[dict]) -> list[str]:
+    """The ids of searchable rows whose query has already been bought."""
+    return [r["id"] for r in searchable_rows(rows) if already_paid(r)]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -96,14 +83,11 @@ def main(argv: list[str] | None = None) -> int:
         rows = list(csv.DictReader(fh))
 
     searchable = searchable_rows(rows)
-    excluded, paid, bands, both = classify(rows)
+    excluded = classify(rows)
 
     print(f"{args.results}: {len(rows):,} rows")
     print(f"  searchable                   : {len(searchable):,}")
-    print(f"  already paid for (cached)    : {paid:,}")
-    print(f"  year bands (not courses)     : {bands:,}")
-    print(f"  counted in both              : {both:,}")
-    print(f"  to exclude                   : {len(excluded):,}")
+    print(f"  already paid for (cached)    : {len(excluded):,}")
     print(f"  left for a new batch         : "
           f"{len(searchable) - len(excluded):,}")
 

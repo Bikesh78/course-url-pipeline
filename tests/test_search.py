@@ -99,6 +99,34 @@ class TestWhatGetsSearched(unittest.TestCase):
     def test_a_blank_course_row_is_searched(self):
         self.assertTrue(is_searchable({"course_url": "", "row_flags": ""}))
 
+    def test_test_booking_rows_are_never_searched(self):
+        """243 rows naming an exam sitting; one product page serves them all."""
+        self.assertFalse(is_searchable(
+            {"course_url": "", "row_flags": "", "name": "GRE Online Booking",
+             "website": "https://www.ets.org/"}))
+
+    def test_the_same_exam_taught_by_a_college_still_is(self):
+        """These fill at 26%. A name-based rule would have dropped them."""
+        self.assertTrue(is_searchable(
+            {"course_url": "", "row_flags": "", "name": "IELTS Preparation",
+             "website": "https://www.languageacademy.com.au/"}))
+
+    def test_a_rule_applies_without_waiting_for_the_flag(self):
+        """`_apply_flags` runs in phase 1; phase 2 reads an older file.
+
+        530 year bands carried no flag and were being paid for every run.
+        """
+        self.assertFalse(is_searchable(
+            {"course_url": "", "row_flags": "", "website": "https://x.edu.au",
+             "name": "Secondary Junior 7-10"}))
+
+    def test_a_filled_row_keeps_its_url_regardless(self):
+        """The gate decides spending, never deletion."""
+        row = {"course_url": "https://www.ets.org/gre.html", "row_flags": "",
+               "name": "GRE Online Booking", "website": "https://www.ets.org/"}
+        self.assertFalse(is_searchable(row))
+        self.assertEqual(row["course_url"], "https://www.ets.org/gre.html")
+
     def test_selection_filters_the_list(self):
         rows = [{"course_url": "", "row_flags": ""},
                 {"course_url": "https://x/a", "row_flags": ""},

@@ -51,14 +51,15 @@ from typing import Callable, Protocol
 
 from pipeline.catalog import clean_url
 from pipeline.fetch import registrable
-from pipeline.load import _host_of
+from pipeline.load import _host_of, is_test_booking, is_year_level
 from pipeline.match import FLOOR
 from pipeline.statuses import CARRIED_OVER, SEARCH_FOUND
 from pipeline.triage import (ShareIndex, add_flag, classify_change,
                             gate_score, phase1_status)
 
 # Flags marking rows for which no course page can exist.
-UNSEARCHABLE_FLAGS = ("occupation_code_not_course", "year_level_not_course")
+UNSEARCHABLE_FLAGS = ("occupation_code_not_course", "year_level_not_course",
+                      "test_booking_not_course")
 
 # Statuses whose hold on a page may be taken by a clearly better match.
 #
@@ -420,13 +421,28 @@ def build_query(name: str, institution: str, site: str) -> str:
 def is_searchable(row: dict) -> bool:
     """Is this row worth spending a paid query on?
 
-    False for rows already filled, for rows whose flags say no course page can
-    exist, and for records the sheet has marked `(Inactive)`.
+    False for rows already filled, for rows no course page can exist for, and
+    for records the sheet has marked `(Inactive)`.
+
+    The non-course rules are checked **twice over**: the flag, and the
+    predicate itself. The flag alone was not enough. `_apply_flags` runs in
+    `pipeline.load` when the *sheet* is read, but phase 2 reads an existing
+    result file, so a rule added after that file was written never reaches it:
+    `year_level_not_course` sat on 54 rows against the 584 `is_year_level`
+    actually matches, and 530 school year bands were being paid for on every
+    run. Re-deriving here makes a new rule bite immediately instead of waiting
+    on a re-crawl.
+
+    The flags are still written, and still checked first -- they are the
+    durable record in the CSV of *why* a row was skipped, which a predicate
+    evaluated at runtime cannot be.
     """
     if (row.get("course_url") or "").strip():
         return False
     flags = row.get("row_flags") or ""
     if any(f in flags for f in UNSEARCHABLE_FLAGS):
+        return False
+    if is_year_level(row.get("name", "")) or is_test_booking(row):
         return False
     # Checked on the course name too, defensively: the marker is on the
     # institution in this sheet, but it costs nothing to honour either.
