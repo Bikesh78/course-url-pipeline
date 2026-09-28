@@ -327,9 +327,7 @@ class SerperProvider:
 
     def search(self, query: str, site: str) -> list[str]:
         """Return candidate URLs for *query*, best first. Empty on a miss."""
-        print(f"aaaaaaa === {query}")
         cached = self._read_cache(query)
-        print(f"cahced result === {cached}")
         if cached is not None:
             self.cache_hits += 1
             return cached
@@ -345,9 +343,6 @@ class SerperProvider:
             self._wait_turn()
             self.paid_calls += 1
             status, body = self.transport(SERPER_ENDPOINT, payload, headers)
-            print(f"serper body ====", body)
-            print(f"serper status ====", status)
-            print("json dump",json.dumps(body, indent=2)[:1500])
 
             if status in (401, 403):
                 raise SearchProviderError(
@@ -582,7 +577,6 @@ def search_rows(rows: list[dict], provider: SearchProvider,
 
     for r in searchable_rows(rows, only_ids):
         site = _host_of(r.get("website", ""))
-        print(f"serper search ====", site)
         if not site:
             continue
         name = r.get("name", "")
@@ -592,7 +586,6 @@ def search_rows(rows: list[dict], provider: SearchProvider,
         try:
             results = provider.search(build_query(name, inst, site),
                                       site)[:MAX_RESULTS]
-            print(f"sereper search result ====", results)
         except SearchProviderError as e:
             # The provider is broken, not merely empty-handed. Stop here and
             # let the caller report it; rows already filled stay filled.
@@ -603,7 +596,6 @@ def search_rows(rows: list[dict], provider: SearchProvider,
             continue
 
         on = [u for u in results if on_site(u, site)]
-        print(f"on ======", on)
         stats.rejected_off_site += len(results) - len(on)
         if not on:
             continue
