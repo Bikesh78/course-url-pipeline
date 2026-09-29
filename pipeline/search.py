@@ -58,8 +58,13 @@ from pipeline.triage import (ShareIndex, add_flag, classify_change,
                             gate_score, phase1_status)
 
 # Flags marking rows for which no course page can exist.
+#
+# `institution_inactive` is never auto-derived like the other three -- it is
+# a deliberate, durable alternative to the `(Inactive)` name-prefix
+# convention for retiring a defunct institution (e.g. a dead domain) without
+# rewriting `institution_name` everywhere it appears.
 UNSEARCHABLE_FLAGS = ("occupation_code_not_course", "year_level_not_course",
-                      "test_booking_not_course")
+                      "test_booking_not_course", "institution_inactive")
 
 # Statuses whose hold on a page may be taken by a clearly better match.
 #
